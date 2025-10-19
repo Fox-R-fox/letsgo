@@ -1,0 +1,14 @@
+flask==2.3.3
+flask-socketio==5.3.6
+flask-sqlalchemy==3.0.5
+flask-login==0.6.3
+python-socketio==5.8.0
+kiteconnect==4.0.0
+pandas==2.0.3
+numpy==1.24.3
+requests==2.31.0
+websocket-client==1.6.1
+python-dateutil==2.8.2
+cryptography==41.0.4
+wtforms==3.0.1
+flask-wtf==1.1.1

@@ -1,0 +1,107 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="row">
+    <div class="col-md-12">
+        <div class="card">
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <h5 class="card-title mb-0">
+                    <i class="fas fa-chart-line"></i> Live Market Watch
+                </h5>
+                <div>
+                    <select class="form-select form-select-sm" id="instrumentFilter" onchange="filterMarketData()">
+                        <option value="all">All Instruments</option>
+                        <option value="stocks">Stocks</option>
+                        <option value="fno">F&O</option>
+                    </select>
+                </div>
+            </div>
+            <div class="card-body">
+                <div class="table-responsive">
+                    <table class="table table-striped table-hover" id="marketWatchTable">
+                        <thead>
+                            <tr>
+                                <th>Symbol</th>
+                                <th>LTP</th>
+                                <th>Change</th>
+                                <th>Change %</th>
+                                <th>Volume</th>
+                                <th>Open</th>
+                                <th>High</th>
+                                <th>Low</th>
+                                <th>Close</th>
+                            </tr>
+                        </thead>
+                        <tbody id="marketWatchBody">
+                            <tr>
+                                <td colspan="9" class="text-center text-muted">
+                                    <div class="loading-spinner"></div>
+                                    Loading market data...
+                                </td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+    function updateMarketWatch(data) {
+        const tbody = document.getElementById('marketWatchBody');
+        let row = document.getElementById(`row-${data.symbol}`);
+        const changeClass = data.change >= 0 ? 'market-up' : 'market-down';
+
+        if (!row) {
+            row = document.createElement('tr');
+            row.id = `row-${data.symbol}`;
+            row.className = 'price-update';
+            row.innerHTML = `
+                <td><strong>${data.symbol}</strong></td>
+                <td>${data.last_price.toFixed(2)}</td>
+                <td class="${changeClass}">${data.change.toFixed(2)}</td>
+                <td class="${changeClass}">${data.change_percent.toFixed(2)}%</td>
+                <td>${data.volume.toLocaleString()}</td>
+                <td>${data.open.toFixed(2)}</td>
+                <td>${data.high.toFixed(2)}</td>
+                <td>${data.low.toFixed(2)}</td>
+                <td>${data.close.toFixed(2)}</td>
+            `;
+            tbody.appendChild(row);
+        } else {
+            row.className = 'price-update';
+            const cells = row.getElementsByTagName('td');
+            cells[1].textContent = data.last_price.toFixed(2);
+            cells[2].textContent = data.change.toFixed(2);
+            cells[2].className = changeClass;
+            cells[3].textContent = data.change_percent.toFixed(2) + '%';
+            cells[3].className = changeClass;
+            cells[4].textContent = data.volume.toLocaleString();
+        }
+
+        setTimeout(() => {
+            if (row) row.className = '';
+        }, 1000);
+    }
+
+    // Socket.io for real-time data
+    socket.on('market_data_update', function(data) {
+        updateMarketWatch(data);
+    });
+
+    // Load initial market data
+    fetch('/api/market_watch_data')
+        .then(response => response.json())
+        .then(data => {
+            data.forEach(updateMarketWatch);
+        });
+
+    function filterMarketData() {
+        const filter = document.getElementById('instrumentFilter').value;
+        // Implementation for filtering
+    }
+</script>
+{% endblock %}

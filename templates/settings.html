@@ -1,0 +1,215 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="row">
+    <div class="col-md-8">
+        <div class="card">
+            <div class="card-header">
+                <h5 class="card-title mb-0">
+                    <i class="fas fa-cog"></i> Trading Settings
+                </h5>
+            </div>
+            <div class="card-body">
+                <div class="mb-4">
+                    <h6>Kite Connect Configuration</h6>
+                    <p class="text-muted">Enter your Kite API credentials for live trading</p>
+                    
+                    <form id="kiteSettingsForm">
+                        <div class="row">
+                            <div class="col-md-6">
+                                <div class="mb-3">
+                                    <label class="form-label">API Key</label>
+                                    <input type="text" class="form-control" id="kiteApiKey" 
+                                           placeholder="Enter your Kite API Key">
+                                </div>
+                            </div>
+                            <div class="col-md-6">
+                                <div class="mb-3">
+                                    <label class="form-label">Access Token</label>
+                                    <input type="password" class="form-control" id="kiteAccessToken" 
+                                           placeholder="Enter your Access Token">
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <div class="mb-3">
+                            <button type="submit" class="btn btn-primary">
+                                <i class="fas fa-save"></i> Save Settings
+                            </button>
+                            <button type="button" class="btn btn-outline-secondary" onclick="loadSettings()">
+                                <i class="fas fa-sync"></i> Reload
+                            </button>
+                        </div>
+                    </form>
+                </div>
+
+                <div class="mb-4">
+                    <h6>Kite Connect Status</h6>
+                    <div id="kiteStatus" class="alert alert-info">
+                        Checking connection status...
+                    </div>
+                    <button class="btn btn-success" onclick="testKiteConnection()">
+                        <i class="fas fa-plug"></i> Test Connection
+                    </button>
+                    <button class="btn btn-warning" onclick="kiteLogin()">
+                        <i class="fas fa-sign-in-alt"></i> Kite Login
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <div class="col-md-4">
+        <div class="card">
+            <div class="card-header">
+                <h6 class="card-title mb-0">Live Trading Balance</h6>
+            </div>
+            <div class="card-body">
+                <div id="liveBalance">
+                    <p class="text-muted">Connect to Kite to view live balance</p>
+                </div>
+            </div>
+        </div>
+        
+        <div class="card mt-3">
+            <div class="card-header">
+                <h6 class="card-title mb-0">Paper Trading Balance</h6>
+            </div>
+            <div class="card-body">
+                <div id="paperBalance">
+                    <p class="text-muted">Loading paper balance...</p>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+    // Load settings on page load
+    document.addEventListener('DOMContentLoaded', function() {
+        loadSettings();
+        loadBalances();
+    });
+
+    function loadSettings() {
+        fetch('/api/user_settings')
+            .then(response => response.json())
+            .then(settings => {
+                document.getElementById('kiteApiKey').value = settings.kite_api_key || '';
+                document.getElementById('kiteAccessToken').value = settings.kite_access_token || '';
+                updateKiteStatus();
+            });
+    }
+
+    function loadBalances() {
+        // Paper balance
+        fetch('/api/wallet_balance?mode=paper')
+            .then(response => response.json())
+            .then(data => {
+                if (data.balance !== undefined) {
+                    document.getElementById('paperBalance').innerHTML = `
+                        <h4>₹${data.balance.toLocaleString()}</h4>
+                        <small class="text-muted">Portfolio Value: ₹${data.portfolio_value.toLocaleString()}</small>
+                    `;
+                }
+            });
+
+        // Live balance
+        fetch('/api/wallet_balance?mode=live')
+            .then(response => response.json())
+            .then(data => {
+                if (data.balance !== undefined) {
+                    document.getElementById('liveBalance').innerHTML = `
+                        <h4>₹${data.balance.toLocaleString()}</h4>
+                        <small class="text-muted">Portfolio Value: ₹${data.portfolio_value.toLocaleString()}</small>
+                    `;
+                } else {
+                    document.getElementById('liveBalance').innerHTML = `
+                        <p class="text-warning">${data.error || 'Not connected to Kite'}</p>
+                    `;
+                }
+            });
+    }
+
+    document.getElementById('kiteSettingsForm').addEventListener('submit', function(e) {
+        e.preventDefault();
+        
+        const settings = {
+            kite_api_key: document.getElementById('kiteApiKey').value,
+            kite_access_token: document.getElementById('kiteAccessToken').value
+        };
+
+        fetch('/api/user_settings', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify(settings)
+        })
+        .then(response => response.json())
+        .then(result => {
+            if (result.success) {
+                showNotification('Settings saved successfully!', 'success');
+                updateKiteStatus();
+                loadBalances();
+            } else {
+                showNotification('Failed to save settings: ' + result.error, 'error');
+            }
+        });
+    });
+
+    function updateKiteStatus() {
+        const apiKey = document.getElementById('kiteApiKey').value;
+        const accessToken = document.getElementById('kiteAccessToken').value;
+        
+        let status = document.getElementById('kiteStatus');
+        
+        if (!apiKey) {
+            status.className = 'alert alert-warning';
+            status.innerHTML = 'API Key not configured';
+        } else if (!accessToken) {
+            status.className = 'alert alert-warning';
+            status.innerHTML = 'Access Token not configured. Use Kite Login to generate one.';
+        } else {
+            status.className = 'alert alert-success';
+            status.innerHTML = 'Credentials configured. Test connection to verify.';
+        }
+    }
+
+    function testKiteConnection() {
+        fetch('/api/kite_profile')
+            .then(response => response.json())
+            .then(result => {
+                if (result.success) {
+                    showNotification('Kite connection successful!', 'success');
+                    document.getElementById('kiteStatus').className = 'alert alert-success';
+                    document.getElementById('kiteStatus').innerHTML = 
+                        `Connected to Kite as: ${result.profile.user_name}`;
+                    loadBalances();
+                } else {
+                    showNotification('Kite connection failed: ' + result.error, 'error');
+                }
+            });
+    }
+
+    function kiteLogin() {
+        fetch('/api/kite_login')
+            .then(response => response.json())
+            .then(result => {
+                if (result.success) {
+                    window.open(result.login_url, '_blank');
+                    showNotification('Please complete authentication in the new window', 'info');
+                } else {
+                    showNotification('Kite login failed: ' + result.error, 'error');
+                }
+            });
+    }
+
+    function showNotification(message, type) {
+        // Simple notification implementation
+        alert(`${type.toUpperCase()}: ${message}`);
+    }
+</script>
+{% endblock %}

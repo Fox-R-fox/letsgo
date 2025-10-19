@@ -1,0 +1,117 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="row">
+    <div class="col-md-12">
+        <div class="card">
+            <div class="card-header">
+                <h5 class="card-title mb-0">
+                    <i class="fas fa-wallet"></i> Current Positions
+                </h5>
+            </div>
+            <div class="card-body">
+                <div class="table-responsive">
+                    <table class="table table-striped table-hover">
+                        <thead>
+                            <tr>
+                                <th>Symbol</th>
+                                <th>Quantity</th>
+                                <th>Avg Price</th>
+                                <th>Current Price</th>
+                                <th>Investment</th>
+                                <th>Current Value</th>
+                                <th>P&L</th>
+                                <th>P&L %</th>
+                            </tr>
+                        </thead>
+                        <tbody id="positionsBody">
+                            <tr>
+                                <td colspan="8" class="text-center text-muted">Loading positions...</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="row mt-4">
+    <div class="col-md-4">
+        <div class="card text-white bg-primary">
+            <div class="card-body">
+                <h6 class="card-title">Total Investment</h6>
+                <h3 id="totalInvestment">₹0.00</h3>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-4">
+        <div class="card text-white bg-success">
+            <div class="card-body">
+                <h6 class="card-title">Total P&L</h6>
+                <h3 id="totalPnl">₹0.00</h3>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-4">
+        <div class="card text-white bg-info">
+            <div class="card-body">
+                <h6 class="card-title">Available Cash</h6>
+                <h3 id="availableCash">₹0.00</h3>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+    function loadPositions() {
+        fetch('/api/positions')
+            .then(response => response.json())
+            .then(positions => {
+                const tbody = document.getElementById('positionsBody');
+                let totalInvestment = 0;
+                let totalPnl = 0;
+
+                if (positions.length === 0) {
+                    tbody.innerHTML = '<tr><td colspan="8" class="text-center text-muted">No positions found</td></tr>';
+                    return;
+                }
+
+                tbody.innerHTML = positions.map(position => {
+                    const investment = position.invested_amount || (position.quantity * position.average_price);
+                    const currentValue = position.quantity * (position.current_price || position.average_price);
+                    const pnl = currentValue - investment;
+                    const pnlPercent = (pnl / investment) * 100;
+
+                    totalInvestment += investment;
+                    totalPnl += pnl;
+
+                    return `
+                        <tr>
+                            <td><strong>${position.symbol}</strong></td>
+                            <td>${position.quantity}</td>
+                            <td>₹${position.average_price.toFixed(2)}</td>
+                            <td>₹${(position.current_price || position.average_price).toFixed(2)}</td>
+                            <td>₹${investment.toFixed(2)}</td>
+                            <td>₹${currentValue.toFixed(2)}</td>
+                            <td class="${pnl >= 0 ? 'market-up' : 'market-down'}">₹${pnl.toFixed(2)}</td>
+                            <td class="${pnl >= 0 ? 'market-up' : 'market-down'}">${pnlPercent.toFixed(2)}%</td>
+                        </tr>
+                    `;
+                }).join('');
+
+                document.getElementById('totalInvestment').textContent = '₹' + totalInvestment.toFixed(2);
+                document.getElementById('totalPnl').textContent = '₹' + totalPnl.toFixed(2);
+                document.getElementById('availableCash').textContent = '₹1,000,000.00'; // Demo value
+            });
+    }
+
+    // Load positions on page load
+    loadPositions();
+
+    // Refresh every 10 seconds
+    setInterval(loadPositions, 10000);
+</script>
+{% endblock %}
