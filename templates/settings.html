@@ -44,6 +44,46 @@
                 </div>
 
                 <div class="mb-4">
+                    <h6>Bot Configuration</h6>
+                    <p class="text-muted">Set default parameters for trading bots</p>
+                    
+                    <form id="botSettingsForm">
+                        <div class="row">
+                            <div class="col-md-4">
+                                <div class="mb-3">
+                                    <label class="form-label">Default Target Profit (₹)</label>
+                                    <input type="number" class="form-control" id="defaultTargetProfit" 
+                                           placeholder="5000" step="100" min="0">
+                                    <small class="form-text text-muted">Profit amount to book before stopping bot</small>
+                                </div>
+                            </div>
+                            <div class="col-md-4">
+                                <div class="mb-3">
+                                    <label class="form-label">Max Duration (hours)</label>
+                                    <input type="number" class="form-control" id="defaultMaxDuration" 
+                                           placeholder="8" step="1" min="1" max="24">
+                                    <small class="form-text text-muted">Maximum bot runtime in hours</small>
+                                </div>
+                            </div>
+                            <div class="col-md-4">
+                                <div class="mb-3">
+                                    <label class="form-label">Max Capital Usage (%)</label>
+                                    <input type="number" class="form-control" id="maxCapitalUsage" 
+                                           placeholder="80" step="5" min="10" max="100">
+                                    <small class="form-text text-muted">Maximum percentage of capital to use</small>
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <div class="mb-3">
+                            <button type="submit" class="btn btn-primary">
+                                <i class="fas fa-save"></i> Save Bot Settings
+                            </button>
+                        </div>
+                    </form>
+                </div>
+
+                <div class="mb-4">
                     <h6>Kite Connect Status</h6>
                     <div id="kiteStatus" class="alert alert-info">
                         Checking connection status...
@@ -81,6 +121,20 @@
                 </div>
             </div>
         </div>
+
+        <div class="card mt-3">
+            <div class="card-header">
+                <h6 class="card-title mb-0">Quick Actions</h6>
+            </div>
+            <div class="card-body">
+                <button class="btn btn-warning w-100 mb-2" onclick="resetPaperPortfolio()">
+                    <i class="fas fa-redo"></i> Reset Paper Portfolio
+                </button>
+                <button class="btn btn-danger w-100" onclick="exitAllPositions()">
+                    <i class="fas fa-sign-out-alt"></i> Exit All Positions
+                </button>
+            </div>
+        </div>
     </div>
 </div>
 {% endblock %}
@@ -97,8 +151,15 @@
         fetch('/api/user_settings')
             .then(response => response.json())
             .then(settings => {
+                // Kite settings
                 document.getElementById('kiteApiKey').value = settings.kite_api_key || '';
                 document.getElementById('kiteAccessToken').value = settings.kite_access_token || '';
+                
+                // Bot settings
+                document.getElementById('defaultTargetProfit').value = settings.default_target_profit || 5000;
+                document.getElementById('defaultMaxDuration').value = settings.default_max_duration || 8;
+                document.getElementById('maxCapitalUsage').value = (settings.max_capital_usage * 100) || 80;
+                
                 updateKiteStatus();
             });
     }
@@ -112,6 +173,8 @@
                     document.getElementById('paperBalance').innerHTML = `
                         <h4>₹${data.balance.toLocaleString()}</h4>
                         <small class="text-muted">Portfolio Value: ₹${data.portfolio_value.toLocaleString()}</small>
+                        <br>
+                        <small class="text-muted">Net P&L: ₹${data.net_pnl.toLocaleString()}</small>
                     `;
                 }
             });
@@ -133,6 +196,7 @@
             });
     }
 
+    // Kite settings form
     document.getElementById('kiteSettingsForm').addEventListener('submit', function(e) {
         e.preventDefault();
         
@@ -151,9 +215,36 @@
         .then(response => response.json())
         .then(result => {
             if (result.success) {
-                showNotification('Settings saved successfully!', 'success');
+                showNotification('Kite settings saved successfully!', 'success');
                 updateKiteStatus();
                 loadBalances();
+            } else {
+                showNotification('Failed to save settings: ' + result.error, 'error');
+            }
+        });
+    });
+
+    // Bot settings form
+    document.getElementById('botSettingsForm').addEventListener('submit', function(e) {
+        e.preventDefault();
+        
+        const settings = {
+            default_target_profit: parseFloat(document.getElementById('defaultTargetProfit').value),
+            default_max_duration: parseInt(document.getElementById('defaultMaxDuration').value),
+            max_capital_usage: parseFloat(document.getElementById('maxCapitalUsage').value) / 100
+        };
+
+        fetch('/api/user_settings', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify(settings)
+        })
+        .then(response => response.json())
+        .then(result => {
+            if (result.success) {
+                showNotification('Bot settings saved successfully!', 'success');
             } else {
                 showNotification('Failed to save settings: ' + result.error, 'error');
             }
@@ -179,37 +270,86 @@
     }
 
     function testKiteConnection() {
-        fetch('/api/kite_profile')
+        fetch('/api/kite_connection_status')
             .then(response => response.json())
             .then(result => {
-                if (result.success) {
+                if (result.connected) {
                     showNotification('Kite connection successful!', 'success');
                     document.getElementById('kiteStatus').className = 'alert alert-success';
                     document.getElementById('kiteStatus').innerHTML = 
-                        `Connected to Kite as: ${result.profile.user_name}`;
+                        `Connected to Kite as: ${result.profile?.user_name || 'Unknown user'}`;
                     loadBalances();
                 } else {
-                    showNotification('Kite connection failed: ' + result.error, 'error');
+                    showNotification('Kite connection failed: ' + result.message, 'error');
+                    document.getElementById('kiteStatus').className = 'alert alert-danger';
+                    document.getElementById('kiteStatus').innerHTML = result.message;
                 }
             });
     }
 
     function kiteLogin() {
-        fetch('/api/kite_login')
+        showNotification('Kite login feature not implemented in demo version', 'info');
+    }
+
+    function resetPaperPortfolio() {
+        if (confirm('Are you sure you want to reset your paper trading portfolio? All positions and P&L will be reset.')) {
+            fetch('/api/reset_paper_portfolio', { method: 'POST' })
+                .then(response => response.json())
+                .then(result => {
+                    if (result.success) {
+                        showNotification('Paper portfolio reset successfully!', 'success');
+                        loadBalances();
+                    } else {
+                        showNotification('Failed to reset portfolio: ' + result.error, 'error');
+                    }
+                });
+        }
+    }
+
+    function exitAllPositions() {
+        if (confirm('Are you sure you want to exit all positions? This will sell all holdings.')) {
+            fetch('/api/exit_all_positions', { 
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({})
+            })
             .then(response => response.json())
             .then(result => {
                 if (result.success) {
-                    window.open(result.login_url, '_blank');
-                    showNotification('Please complete authentication in the new window', 'info');
+                    showNotification(`Exited ${result.exited_positions?.length || 0} positions! P&L: ₹${result.total_realized_pnl.toLocaleString()}`, 'success');
+                    loadBalances();
                 } else {
-                    showNotification('Kite login failed: ' + result.error, 'error');
+                    showNotification('Failed to exit positions: ' + result.error, 'error');
                 }
             });
+        }
     }
 
     function showNotification(message, type) {
-        // Simple notification implementation
-        alert(`${type.toUpperCase()}: ${message}`);
+        // Use the notification system from your main dashboard
+        if (typeof showNotification === 'function') {
+            window.showNotification(message, type);
+        } else {
+            // Fallback notification
+            const alertClass = type === 'success' ? 'alert-success' : 
+                             type === 'error' ? 'alert-danger' : 
+                             type === 'warning' ? 'alert-warning' : 'alert-info';
+            
+            const notification = document.createElement('div');
+            notification.className = `alert ${alertClass} alert-dismissible fade show`;
+            notification.innerHTML = `
+                ${message}
+                <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+            `;
+            
+            document.body.appendChild(notification);
+            
+            setTimeout(() => {
+                notification.remove();
+            }, 5000);
+        }
     }
 </script>
 {% endblock %}
