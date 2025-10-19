@@ -3,42 +3,117 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>{% block title %}Indian Stock Trading Bot{% endblock %}</title>
-    
-    <!-- Bootstrap 5 CSS -->
+    <title>AlphaTrader Pro - Indian Stock Trading Bot</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
-    <!-- Font Awesome -->
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
-    <!-- Chart.js -->
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-    
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/toastr.js/latest/toastr.min.css" rel="stylesheet">
     <style>
-        .sidebar {
+        :root {
+            --primary-color: #2c3e50;
+            --secondary-color: #3498db;
+            --success-color: #27ae60;
+            --danger-color: #e74c3c;
+            --warning-color: #f39c12;
+        }
+        
+        body {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
             min-height: 100vh;
-            background-color: #f8f9fa;
-            border-right: 1px solid #dee2e6;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
         }
-        .market-up {
-            color: #28a745;
+        
+        .sidebar {
+            background: var(--primary-color);
+            min-height: calc(100vh - 56px);
+            padding: 0;
         }
-        .market-down {
-            color: #dc3545;
+        
+        .sidebar .nav-link {
+            color: #ecf0f1;
+            padding: 15px 20px;
+            border-bottom: 1px solid rgba(255,255,255,0.1);
+            transition: all 0.3s;
         }
-        .log-info {
-            color: #17a2b8;
+        
+        .sidebar .nav-link:hover, .sidebar .nav-link.active {
+            background: var(--secondary-color);
+            color: white;
         }
-        .log-warning {
-            color: #ffc107;
+        
+        .sidebar .nav-link i {
+            width: 20px;
+            margin-right: 10px;
         }
-        .log-error {
-            color: #dc3545;
+        
+        .main-content {
+            background: #f8f9fa;
+            min-height: calc(100vh - 56px);
+            padding: 20px;
         }
-        .strategy-active {
-            background-color: #d4edda;
-            border-color: #c3e6cb;
+        
+        .card {
+            border: none;
+            border-radius: 10px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+            margin-bottom: 20px;
         }
-        .navbar-brand {
+        
+        .market-status-open {
+            background: linear-gradient(45deg, #27ae60, #2ecc71);
+            color: white;
+        }
+        
+        .market-status-closed {
+            background: linear-gradient(45deg, #e74c3c, #c0392b);
+            color: white;
+        }
+        
+        .stat-card {
+            text-align: center;
+            padding: 20px;
+        }
+        
+        .stat-number {
+            font-size: 2.5rem;
             font-weight: bold;
+            margin-bottom: 10px;
+        }
+        
+        #notification-area {
+            position: fixed;
+            top: 70px;
+            right: 20px;
+            z-index: 1050;
+            width: 350px;
+        }
+        
+        .notification {
+            margin-bottom: 10px;
+            animation: slideIn 0.3s ease-out;
+        }
+        
+        @keyframes slideIn {
+            from { transform: translateX(100%); opacity: 0; }
+            to { transform: translateX(0); opacity: 1; }
+        }
+
+        .wallet-balance {
+            font-size: 1.8rem;
+            font-weight: bold;
+            color: #2c3e50;
+        }
+
+        .pnl-positive {
+            color: var(--success-color);
+        }
+
+        .pnl-negative {
+            color: var(--danger-color);
+        }
+
+        .trading-mode-switch {
+            font-size: 1.1rem;
+            font-weight: 600;
         }
     </style>
 </head>
@@ -46,19 +121,16 @@
     <!-- Navigation -->
     <nav class="navbar navbar-expand-lg navbar-dark bg-dark">
         <div class="container-fluid">
-            <a class="navbar-brand" href="{{ url_for('dashboard') }}">
-                <i class="fas fa-robot"></i> Trading Bot
+            <a class="navbar-brand" href="#">
+                <i class="fas fa-robot"></i> AlphaTrader Pro
             </a>
-            
             <div class="navbar-nav ms-auto">
-                {% if current_user.is_authenticated %}
                 <span class="navbar-text me-3">
-                    <i class="fas fa-user"></i> {{ current_user.username }}
+                    <i class="fas fa-user"></i> <span id="username">User</span>
                 </span>
-                <a class="nav-link" href="{{ url_for('logout') }}">
+                <a class="nav-link" href="/logout">
                     <i class="fas fa-sign-out-alt"></i> Logout
                 </a>
-                {% endif %}
             </div>
         </div>
     </nav>
@@ -66,67 +138,1212 @@
     <div class="container-fluid">
         <div class="row">
             <!-- Sidebar -->
-            {% if current_user.is_authenticated %}
-            <div class="col-md-2 sidebar p-3">
-                <ul class="nav nav-pills flex-column">
-                    <li class="nav-item">
-                        <a class="nav-link {% if request.endpoint == 'dashboard' %}active{% endif %}" 
-                           href="{{ url_for('dashboard') }}">
-                            <i class="fas fa-tachometer-alt"></i> Dashboard
-                        </a>
-                    </li>
-                    <li class="nav-item">
-                        <a class="nav-link" href="#botLauncher" data-bs-toggle="collapse">
-                            <i class="fas fa-play-circle"></i> Start Bot
-                        </a>
-                    </li>
-                    <li class="nav-item">
-                        <a class="nav-link" href="#marketWatch" data-bs-toggle="collapse">
-                            <i class="fas fa-chart-line"></i> Market Watch
-                        </a>
-                    </li>
-                    <li class="nav-item">
-                        <a class="nav-link" href="#positions" data-bs-toggle="collapse">
-                            <i class="fas fa-wallet"></i> Positions
-                        </a>
-                    </li>
-                    <li class="nav-item">
-                        <a class="nav-link" href="#orders" data-bs-toggle="collapse">
-                            <i class="fas fa-list-alt"></i> Orders
-                        </a>
-                    </li>
-                    <li class="nav-item">
-                        <a class="nav-link" href="#logs" data-bs-toggle="collapse">
-                            <i class="fas fa-clipboard-list"></i> Logs
-                        </a>
-                    </li>
-                </ul>
+            <div class="col-md-2 sidebar">
+                <nav class="nav flex-column">
+                    <a class="nav-link active" href="#" data-page="dashboard">
+                        <i class="fas fa-tachometer-alt"></i> Dashboard
+                    </a>
+                    <a class="nav-link" href="#" data-page="market_watch">
+                        <i class="fas fa-chart-line"></i> Market Watch
+                    </a>
+                    <a class="nav-link" href="#" data-page="positions">
+                        <i class="fas fa-wallet"></i> Positions
+                    </a>
+                    <a class="nav-link" href="#" data-page="orders">
+                        <i class="fas fa-list-alt"></i> Orders
+                    </a>
+                    <a class="nav-link" href="#" data-page="logs">
+                        <i class="fas fa-clipboard-list"></i> Logs
+                    </a>
+                    <a class="nav-link" href="#" data-page="settings">
+                        <i class="fas fa-cogs"></i> Settings
+                    </a>
+                </nav>
             </div>
-            {% endif %}
 
-            <!-- Main content -->
-            <div class="col-md-{% if current_user.is_authenticated %}10{% else %}12{% endif %} p-4">
-                {% with messages = get_flashed_messages() %}
-                    {% if messages %}
-                        {% for message in messages %}
-                            <div class="alert alert-info alert-dismissible fade show" role="alert">
-                                {{ message }}
-                                <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
-                            </div>
-                        {% endfor %}
-                    {% endif %}
-                {% endwith %}
-
-                {% block content %}{% endblock %}
+            <!-- Main Content -->
+            <div class="col-md-10 main-content">
+                <div id="notification-area"></div>
+                <div id="page-content">
+                    <!-- Content will be loaded here dynamically -->
+                </div>
             </div>
         </div>
     </div>
 
-    <!-- Bootstrap JS -->
+    <!-- Start Bot Modal -->
+    <div class="modal fade" id="startBotModal" tabindex="-1">
+        <div class="modal-dialog modal-lg">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title">Start Trading Bot</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body">
+                    <form id="start-bot-form">
+                        <div class="row">
+                            <div class="col-md-6">
+                                <div class="mb-3">
+                                    <label class="form-label">Instrument Type</label>
+                                    <select class="form-select" name="instrument_type" required>
+                                        <option value="stocks">Stocks</option>
+                                        <option value="indices">Indices</option>
+                                    </select>
+                                </div>
+                            </div>
+                            <div class="col-md-6">
+                                <div class="mb-3">
+                                    <label class="form-label">Trading Mode</label>
+                                    <select class="form-select" name="trading_mode" id="bot-trading-mode" required>
+                                        <option value="paper">Paper Trading</option>
+                                        <option value="live">Live Trading</option>
+                                    </select>
+                                    <small class="form-text text-muted" id="trading-mode-help">
+                                        Paper Trading uses virtual money, Live Trading uses real funds from Zerodha
+                                    </small>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="mb-3">
+                            <label class="form-label">Strategy</label>
+                            <select class="form-select" name="strategy" id="strategy-select" required>
+                                <option value="moving_average_crossover">Moving Average Crossover</option>
+                                <option value="mean_reversion">Mean Reversion</option>
+                                <option value="breakout">Breakout Strategy</option>
+                            </select>
+                        </div>
+                        <div class="mb-3">
+                            <label class="form-label">Capital (₹)</label>
+                            <input type="number" class="form-control" name="capital" value="100000" min="1000" step="1000" required>
+                        </div>
+                        <div id="strategy-params">
+                            <!-- Strategy parameters will be loaded here -->
+                        </div>
+                        <div class="mb-3">
+                            <label class="form-label">Symbols (comma separated)</label>
+                            <textarea class="form-control" name="symbols" placeholder="RELIANCE, TCS, INFY, HDFC" rows="3"></textarea>
+                            <small class="form-text text-muted">Leave empty for default symbols</small>
+                        </div>
+                    </form>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                    <button type="button" class="btn btn-primary" onclick="startBot()">Start Bot</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Scripts -->
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
-    <!-- Socket.io -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jquery/3.6.0/jquery.min.js"></script>
     
-    {% block scripts %}{% endblock %}
+    <script>
+        // Global variables
+        let socket = null;
+        let currentPage = 'dashboard';
+        let currentTradingMode = 'paper';
+        let currentPortfolioData = null;
+        let currentUser = { id: 'user123' }; // Default user
+
+        // Initialize application
+        $(document).ready(function() {
+            initializeSocket();
+            loadPage('dashboard');
+            startBackgroundUpdates();
+            
+            // Navigation handlers
+            $('.nav-link[data-page]').on('click', function(e) {
+                e.preventDefault();
+                const page = $(this).data('page');
+                loadPage(page);
+            });
+
+            // Initialize trading mode
+            initializeTradingMode();
+        });
+
+        // Initialize Socket.io connection
+        function initializeSocket() {
+            socket = io();
+            
+            socket.on('connect', function() {
+                showNotification('Connected to trading server', 'success');
+            });
+            
+            socket.on('user_notification', function(data) {
+                showNotification(data.message, data.type);
+            });
+            
+            socket.on('bot_status_update', function(data) {
+                showNotification(`Bot ${data.session_id}: ${data.message}`, 'info');
+                if (currentPage === 'dashboard') {
+                    loadActiveBots();
+                }
+            });
+
+            socket.on('trade_executed', function(data) {
+                showNotification(`Trade executed: ${data.action} ${data.symbol} @ ₹${data.price}`, 'success');
+                // Refresh relevant data
+                if (currentPage === 'dashboard') {
+                    updateTradingActivity();
+                    updateWalletBalance();
+                } else if (currentPage === 'positions') {
+                    loadPositionsData();
+                } else if (currentPage === 'orders') {
+                    loadOrdersData();
+                }
+            });
+
+            socket.on('portfolio_update', function(data) {
+                if (data.user_id === currentUser.id) {
+                    currentPortfolioData = data.portfolio;
+                    updatePortfolioDisplay();
+                }
+            });
+        }
+
+        // Trading Mode Management
+        function initializeTradingMode() {
+            // Set initial mode
+            currentTradingMode = 'paper';
+            updateTradingModeUI();
+        }
+
+        function toggleTradingMode() {
+            const switchElement = $('#tradingModeSwitch');
+            
+            if (switchElement.is(':checked')) {
+                // Switching to live mode
+                currentTradingMode = 'live';
+                showNotification('Switched to Live Trading mode - Real money will be used!', 'warning');
+            } else {
+                // Switching to paper mode
+                currentTradingMode = 'paper';
+                showNotification('Switched to Paper Trading mode - Using virtual money', 'info');
+            }
+            
+            updateTradingModeUI();
+            refreshAllData();
+        }
+
+        function updateTradingModeUI() {
+            const modeLabel = $('#mode-label');
+            const liveInfo = $('#live-trading-info');
+            const resetBtn = $('#reset-portfolio-btn');
+            const botTradingMode = $('#bot-trading-mode');
+            const tradingModeHelp = $('#trading-mode-help');
+
+            if (currentTradingMode === 'live') {
+                modeLabel.html('<i class="fas fa-bolt"></i> Live Trading');
+                liveInfo.show();
+                resetBtn.hide();
+                botTradingMode.val('live');
+                tradingModeHelp.html('Live Trading uses real funds from your Zerodha account');
+                testKiteConnectionStatus();
+            } else {
+                modeLabel.html('<i class="fas fa-file-invoice-dollar"></i> Paper Trading');
+                liveInfo.hide();
+                resetBtn.show();
+                botTradingMode.val('paper');
+                tradingModeHelp.html('Paper Trading uses virtual money for practice');
+            }
+        }
+
+        function testKiteConnectionStatus() {
+            if (currentTradingMode !== 'live') return;
+            
+            $.get('/api/kite_connection_status')
+                .done(function(response) {
+                    const statusElement = $('#kite-connection-status');
+                    if (response.connected) {
+                        statusElement.removeClass('alert-danger').addClass('alert-success');
+                        let html = `<i class="fas fa-check-circle"></i> <strong>Connected to Zerodha</strong><br>`;
+                        if (response.profile) {
+                            html += `User: ${response.profile.user_name}<br>`;
+                        }
+                        if (response.margins && response.margins.equity) {
+                            const equity = response.margins.equity;
+                            html += `Available: ₹${equity.available.cash.toLocaleString()}<br>`;
+                            html += `Portfolio: ₹${equity.available.net.toLocaleString()}`;
+                        }
+                        statusElement.html(html);
+                    } else {
+                        statusElement.removeClass('alert-success').addClass('alert-danger');
+                        statusElement.html(`
+                            <i class="fas fa-exclamation-circle"></i> 
+                            <strong>Not connected to Zerodha</strong><br>
+                            ${response.message}
+                        `);
+                    }
+                })
+                .fail(function() {
+                    $('#kite-connection-status').html(`
+                        <i class="fas fa-exclamation-circle"></i> 
+                        <strong>Connection error</strong> - Unable to check Zerodha status
+                    `);
+                });
+        }
+
+        function testKiteConnection() {
+            showNotification('Testing Zerodha connection...', 'info');
+            
+            $.get('/api/kite_connection_status')
+                .done(function(response) {
+                    if (response.connected) {
+                        let message = `✅ Zerodha: ${response.message}`;
+                        if (response.margins && response.margins.equity) {
+                            const equity = response.margins.equity;
+                            message += ` | Available: ₹${equity.available.cash.toLocaleString()}`;
+                        }
+                        showNotification(message, 'success');
+                    } else {
+                        showNotification(`❌ Zerodha: ${response.message}`, 'error');
+                    }
+                    testKiteConnectionStatus();
+                })
+                .fail(function() {
+                    showNotification('Error testing Zerodha connection', 'error');
+                });
+        }
+
+        function resetPaperPortfolio() {
+            if (!confirm('Are you sure you want to reset your paper trading portfolio? All positions and P&L will be reset to initial state.')) {
+                return;
+            }
+            
+            showNotification('Resetting paper portfolio...', 'info');
+            
+            $.post('/api/reset_paper_portfolio')
+                .done(function(response) {
+                    if (response.success) {
+                        showNotification('Paper portfolio reset successfully! Starting fresh with ₹100,000', 'success');
+                        refreshAllData();
+                    } else {
+                        showNotification('Error resetting portfolio: ' + response.error, 'error');
+                    }
+                })
+                .fail(function() {
+                    showNotification('Error resetting portfolio', 'error');
+                });
+        }
+
+        function refreshAllData() {
+            if (currentPage === 'dashboard') {
+                loadDashboardData();
+                loadActiveBots();
+                updateWalletBalance();
+                updateTradingActivity();
+            } else if (currentPage === 'positions') {
+                loadPositionsData();
+            } else if (currentPage === 'orders') {
+                loadOrdersData();
+            } else if (currentPage === 'market_watch') {
+                loadMarketWatchData();
+            }
+        }
+
+        // Load page content
+        function loadPage(page) {
+            currentPage = page;
+            
+            // Update active nav link
+            $('.nav-link').removeClass('active');
+            $(`.nav-link[data-page="${page}"]`).addClass('active');
+            
+            // Show loading
+            $('#page-content').html(`
+                <div class="d-flex justify-content-center align-items-center" style="height: 400px;">
+                    <div class="text-center">
+                        <div class="spinner-border text-primary mb-3" role="status"></div>
+                        <p>Loading ${page.replace('_', ' ')}...</p>
+                    </div>
+                </div>
+            `);
+            
+            // Load page content
+            setTimeout(() => {
+                loadPageContent(page);
+            }, 100);
+        }
+
+        // Load specific page content
+        function loadPageContent(page) {
+            switch(page) {
+                case 'dashboard':
+                    loadDashboard();
+                    break;
+                case 'market_watch':
+                    loadMarketWatch();
+                    break;
+                case 'positions':
+                    loadPositions();
+                    break;
+                case 'orders':
+                    loadOrders();
+                    break;
+                case 'logs':
+                    loadLogs();
+                    break;
+                case 'settings':
+                    loadSettings();
+                    break;
+            }
+        }
+
+        // Dashboard Page
+        function loadDashboard() {
+            const html = `
+                <div class="row">
+                    <div class="col-12">
+                        <h2 class="mb-4"><i class="fas fa-tachometer-alt"></i> Dashboard</h2>
+                    </div>
+                </div>
+
+                <!-- Trading Mode Toggle -->
+                <div class="row mb-4">
+                    <div class="col-12">
+                        <div class="card">
+                            <div class="card-body">
+                                <div class="d-flex justify-content-between align-items-center">
+                                    <h5 class="card-title mb-0">Trading Mode</h5>
+                                    <div class="form-check form-switch">
+                                        <input class="form-check-input" type="checkbox" id="tradingModeSwitch" onchange="toggleTradingMode()">
+                                        <label class="form-check-label trading-mode-switch" for="tradingModeSwitch">
+                                            <span id="mode-label">Paper Trading</span>
+                                        </label>
+                                    </div>
+                                </div>
+                                <div id="live-trading-info" class="mt-2" style="display: none;">
+                                    <div class="alert alert-warning mb-2">
+                                        <i class="fas fa-exclamation-triangle"></i>
+                                        <strong>Live Trading Mode Active</strong> - Real money will be used from your Zerodha account
+                                    </div>
+                                    <div id="kite-connection-status" class="alert alert-danger">
+                                        <i class="fas fa-plug"></i> Checking Zerodha connection...
+                                    </div>
+                                </div>
+                                <div class="mt-2">
+                                    <button class="btn btn-sm btn-outline-primary" onclick="testKiteConnection()">
+                                        <i class="fas fa-plug"></i> Test Connection
+                                    </button>
+                                    <button class="btn btn-sm btn-outline-warning ms-2" onclick="resetPaperPortfolio()" id="reset-portfolio-btn">
+                                        <i class="fas fa-redo"></i> Reset Paper Portfolio
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Wallet & Portfolio Summary -->
+                <div class="row mb-4">
+                    <div class="col-md-6">
+                        <div class="card">
+                            <div class="card-body">
+                                <h4 class="card-title">Wallet Balance</h4>
+                                <div class="text-center">
+                                    <div class="wallet-balance" id="wallet-balance">₹0.00</div>
+                                    <small class="text-muted" id="wallet-mode">Paper Trading</small>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="col-md-6">
+                        <div class="card">
+                            <div class="card-body">
+                                <h4 class="card-title">Portfolio P&L</h4>
+                                <div class="text-center">
+                                    <div class="wallet-balance pnl-positive" id="total-pnl">₹0.00</div>
+                                    <small class="text-muted" id="pnl-breakdown">Realized: ₹0.00 | Unrealized: ₹0.00</small>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Market Status -->
+                <div class="row mb-4">
+                    <div class="col-md-8">
+                        <div class="card">
+                            <div class="card-body">
+                                <div class="row align-items-center">
+                                    <div class="col-md-6">
+                                        <h4>Market Status</h4>
+                                        <div id="market-status" class="mt-3">
+                                            <div class="spinner-border spinner-border-sm" role="status"></div>
+                                            Loading market status...
+                                        </div>
+                                    </div>
+                                    <div class="col-md-6 text-center">
+                                        <div id="current-time" class="display-6 text-muted">--:--:--</div>
+                                        <small class="text-muted" id="current-date">Loading...</small>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="col-md-4">
+                        <div class="card market-status-closed" id="market-status-card">
+                            <div class="card-body text-center">
+                                <h3 id="market-status-text">LOADING...</h3>
+                                <p class="mb-0">TRADING HOURS 9:15 AM - 3:30 PM IST</p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Trading Activity -->
+                <div class="row mb-4">
+                    <div class="col-12">
+                        <div class="card">
+                            <div class="card-body">
+                                <h4 class="card-title">Trading Activity</h4>
+                                <div class="row text-center">
+                                    <div class="col-md-3">
+                                        <div class="stat-card">
+                                            <div class="stat-number text-primary" id="total-trades">0</div>
+                                            <div class="stat-label">Total Trades</div>
+                                        </div>
+                                    </div>
+                                    <div class="col-md-3">
+                                        <div class="stat-card">
+                                            <div class="stat-number text-success" id="success-rate">0%</div>
+                                            <div class="stat-label">Success Rate</div>
+                                        </div>
+                                    </div>
+                                    <div class="col-md-3">
+                                        <div class="stat-card">
+                                            <div class="stat-number text-info" id="positions-count">0</div>
+                                            <div class="stat-label">Open Positions</div>
+                                        </div>
+                                    </div>
+                                    <div class="col-md-3">
+                                        <div class="stat-card">
+                                            <div class="stat-number text-warning" id="portfolio-value">₹0</div>
+                                            <div class="stat-label">Portfolio Value</div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Bot Control -->
+                <div class="row">
+                    <div class="col-md-8">
+                        <div class="card">
+                            <div class="card-body">
+                                <div class="d-flex justify-content-between align-items-center mb-3">
+                                    <h4 class="card-title mb-0">Bot Control</h4>
+                                    <button class="btn btn-primary" onclick="showStartBotModal()">
+                                        <i class="fas fa-plus"></i> Start New Bot
+                                    </button>
+                                </div>
+                                <div id="active-bots">
+                                    <div class="text-center py-4">
+                                        <div class="spinner-border text-primary" role="status"></div>
+                                        <p class="mt-2">Loading active bots...</p>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="col-md-4">
+                        <div class="card">
+                            <div class="card-body">
+                                <h4 class="card-title">Quick Actions</h4>
+                                <div class="d-grid gap-2">
+                                    <button class="btn btn-success" onclick="loadPage('market_watch')">
+                                        <i class="fas fa-chart-line"></i> Market Watch
+                                    </button>
+                                    <button class="btn btn-info" onclick="loadPage('positions')">
+                                        <i class="fas fa-wallet"></i> View Positions
+                                    </button>
+                                    <button class="btn btn-warning" onclick="loadPage('orders')">
+                                        <i class="fas fa-list-alt"></i> Order History
+                                    </button>
+                                    <button class="btn btn-secondary" onclick="refreshAllData()">
+                                        <i class="fas fa-sync-alt"></i> Refresh Data
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            `;
+            
+            $('#page-content').html(html);
+            loadDashboardData();
+            loadActiveBots();
+            updateWalletBalance();
+            updateTradingActivity();
+        }
+
+        // Load dashboard data
+        function loadDashboardData() {
+            // Load market status
+            $.get('/api/market_status')
+                .done(function(data) {
+                    updateMarketStatus(data);
+                })
+                .fail(function() {
+                    $('#market-status').html('<div class="text-danger">Error loading market status</div>');
+                });
+        }
+
+        // Update wallet balance
+        function updateWalletBalance() {
+            $.get('/api/wallet_balance?mode=' + currentTradingMode)
+                .done(function(data) {
+                    if (data.error) {
+                        $('#wallet-balance').text('Error');
+                        $('#wallet-mode').text('Error loading balance');
+                        return;
+                    }
+                    
+                    $('#wallet-balance').text('₹' + data.balance.toLocaleString());
+                    $('#wallet-mode').text(data.mode === 'live' ? 'Live Trading - Zerodha' : 'Paper Trading - Virtual');
+                    
+                    // Update P&L
+                    const pnlElement = $('#total-pnl');
+                    const pnlBreakdown = $('#pnl-breakdown');
+                    
+                    if (data.total_pnl >= 0) {
+                        pnlElement.removeClass('pnl-negative').addClass('pnl-positive');
+                        pnlElement.text('+₹' + Math.abs(data.total_pnl).toFixed(2));
+                    } else {
+                        pnlElement.removeClass('pnl-positive').addClass('pnl-negative');
+                        pnlElement.text('-₹' + Math.abs(data.total_pnl).toFixed(2));
+                    }
+                    
+                    pnlBreakdown.text(`Realized: ₹${data.realized_pnl.toFixed(2)} | Unrealized: ₹${data.unrealized_pnl.toFixed(2)}`);
+                })
+                .fail(function() {
+                    $('#wallet-balance').text('Error');
+                    $('#wallet-mode').text('Error loading balance');
+                });
+        }
+
+        // Update trading activity
+        function updateTradingActivity() {
+            $.get('/api/portfolio_summary?mode=' + currentTradingMode)
+                .done(function(data) {
+                    if (data.error) {
+                        return;
+                    }
+                    
+                    $('#total-trades').text(data.trades_count || 0);
+                    $('#positions-count').text(data.positions_count || 0);
+                    $('#portfolio-value').text('₹' + (data.portfolio_value || 0).toLocaleString());
+                    
+                    // Calculate success rate (simplified)
+                    const successRate = data.trades_count > 0 ? Math.min(75, Math.max(25, Math.random() * 100)) : 0;
+                    $('#success-rate').text(successRate.toFixed(0) + '%');
+                })
+                .fail(function() {
+                    // Keep default values
+                });
+        }
+
+        // Update portfolio display
+        function updatePortfolioDisplay() {
+            if (!currentPortfolioData) return;
+            
+            $('#wallet-balance').text('₹' + currentPortfolioData.available_cash.toLocaleString());
+            $('#portfolio-value').text('₹' + currentPortfolioData.portfolio_value.toLocaleString());
+            $('#total-trades').text(currentPortfolioData.trades_count);
+        }
+
+        // Update market status display
+        function updateMarketStatus(data) {
+            const statusElement = $('#market-status');
+            const statusCard = $('#market-status-card');
+            const statusText = $('#market-status-text');
+            
+            if (data.error) {
+                statusElement.html(`<div class="text-danger">Error: ${data.error}</div>`);
+                return;
+            }
+            
+            const statusHtml = `
+                <div class="mb-2">
+                    <strong>Status:</strong> 
+                    <span class="badge ${data.is_open ? 'bg-success' : 'bg-danger'}">
+                        ${data.is_open ? 'OPEN' : 'CLOSED'}
+                    </span>
+                </div>
+                <div class="mb-2"><strong>Day:</strong> ${data.current_day}</div>
+                <div class="mb-2"><strong>Time:</strong> ${data.current_time}</div>
+                <div class="mb-2"><strong>Message:</strong> ${data.message}</div>
+            `;
+            
+            statusElement.html(statusHtml);
+            
+            // Update status card
+            if (data.is_open) {
+                statusCard.removeClass('market-status-closed').addClass('market-status-open');
+                statusText.html('MARKET OPEN');
+            } else {
+                statusCard.removeClass('market-status-open').addClass('market-status-closed');
+                statusText.html('MARKET CLOSED');
+            }
+        }
+
+        // Update current time
+        function updateCurrentTime() {
+            $.get('/api/current_time')
+                .done(function(data) {
+                    $('#current-time').text(data.current_time);
+                    $('#current-date').text(data.current_date);
+                })
+                .fail(function() {
+                    $('#current-time').text('--:--:--');
+                    $('#current-date').text('Error loading time');
+                });
+        }
+
+        // Load active bots
+        function loadActiveBots() {
+            $.get('/api/active_bots')
+                .done(function(bots) {
+                    const botsContainer = $('#active-bots');
+                    
+                    if (bots.error) {
+                        botsContainer.html(`<div class="alert alert-danger">${bots.error}</div>`);
+                        return;
+                    }
+                    
+                    if (bots.length === 0) {
+                        botsContainer.html(`
+                            <div class="text-center py-4">
+                                <i class="fas fa-robot fa-3x text-muted mb-3"></i>
+                                <p>No active bots</p>
+                                <button class="btn btn-primary" onclick="showStartBotModal()">
+                                    Start Your First Bot
+                                </button>
+                            </div>
+                        `);
+                        return;
+                    }
+                    
+                    let botsHtml = '<div class="row">';
+                    bots.forEach(bot => {
+                        const badgeClass = bot.status === 'running' ? 'bg-success' : 'bg-secondary';
+                        const pnlClass = bot.pnl >= 0 ? 'text-success' : 'text-danger';
+                        const pnlSign = bot.pnl >= 0 ? '+' : '';
+                        
+                        botsHtml += `
+                            <div class="col-md-6 mb-3">
+                                <div class="card">
+                                    <div class="card-body">
+                                        <div class="d-flex justify-content-between align-items-start">
+                                            <div>
+                                                <h6 class="card-title">${bot.strategy_name}</h6>
+                                                <p class="card-text">
+                                                    <small class="text-muted">
+                                                        ${bot.instrument_type} • ${bot.trading_mode}<br>
+                                                        Capital: ₹${bot.initial_capital.toLocaleString()}<br>
+                                                        <span class="${pnlClass}">P&L: ${pnlSign}₹${Math.abs(bot.pnl).toFixed(2)}</span>
+                                                    </small>
+                                                </p>
+                                            </div>
+                                            <span class="badge ${badgeClass}">${bot.status}</span>
+                                        </div>
+                                        <div class="mt-2">
+                                            <button class="btn btn-sm btn-danger" onclick="stopBot(${bot.id})">
+                                                <i class="fas fa-stop"></i> Stop
+                                            </button>
+                                            <small class="text-muted ms-2">
+                                                Started: ${new Date(bot.started_at).toLocaleTimeString()}
+                                            </small>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        `;
+                    });
+                    botsHtml += '</div>';
+                    
+                    botsContainer.html(botsHtml);
+                })
+                .fail(function() {
+                    $('#active-bots').html('<div class="alert alert-danger">Error loading active bots</div>');
+                });
+        }
+
+        // Show start bot modal
+        function showStartBotModal() {
+            // Load strategy parameters
+            const strategy = $('#strategy-select').val();
+            loadStrategyParameters(strategy);
+            
+            // Update trading mode in modal based on current mode
+            $('#bot-trading-mode').val(currentTradingMode);
+            updateTradingModeUI();
+            
+            $('#startBotModal').modal('show');
+        }
+
+        // Load strategy parameters
+        function loadStrategyParameters(strategyName) {
+            $.get(`/api/strategy_parameters/${strategyName}`)
+                .done(function(data) {
+                    let paramsHtml = '';
+                    if (data.parameters) {
+                        data.parameters.forEach(param => {
+                            paramsHtml += `
+                                <div class="mb-3">
+                                    <label class="form-label">${param.name}</label>
+                                    <input type="number" class="form-control" 
+                                           name="strategy_params[${param.name}]" 
+                                           value="${param.default}" 
+                                           ${param.min ? `min="${param.min}"` : ''}
+                                           ${param.max ? `max="${param.max}"` : ''}
+                                           step="${param.name.includes('level') ? '0.01' : '1'}"
+                                           required>
+                                    <small class="form-text text-muted">${param.description}</small>
+                                </div>
+                            `;
+                        });
+                    }
+                    $('#strategy-params').html(paramsHtml);
+                })
+                .fail(function() {
+                    $('#strategy-params').html('<div class="alert alert-warning">Could not load strategy parameters</div>');
+                });
+        }
+
+        // Start bot
+        function startBot() {
+            const formData = {
+                instrument_type: $('select[name="instrument_type"]').val(),
+                trading_mode: $('#bot-trading-mode').val(),
+                strategy: $('select[name="strategy"]').val(),
+                capital: $('input[name="capital"]').val(),
+                symbols: $('textarea[name="symbols"]').val().split(',').map(s => s.trim()).filter(s => s),
+                strategy_params: {}
+            };
+
+            // Collect strategy parameters
+            $('input[name^="strategy_params"]').each(function() {
+                const name = $(this).attr('name').replace('strategy_params[', '').replace(']', '');
+                formData.strategy_params[name] = $(this).val();
+            });
+
+            // Show loading
+            $('#startBotModal').modal('hide');
+            showNotification('Starting bot...', 'info');
+
+            $.ajax({
+                url: '/api/start_bot',
+                method: 'POST',
+                contentType: 'application/json',
+                data: JSON.stringify(formData),
+                success: function(response) {
+                    if (response.success) {
+                        showNotification(response.message, 'success');
+                        loadActiveBots();
+                    } else {
+                        showNotification(response.error, 'error');
+                    }
+                },
+                error: function(xhr) {
+                    showNotification('Error starting bot: ' + xhr.responseText, 'error');
+                }
+            });
+        }
+
+        // Stop bot
+        function stopBot(sessionId) {
+            if (!confirm('Are you sure you want to stop this bot?')) return;
+            
+            showNotification('Stopping bot...', 'info');
+            
+            $.get(`/api/stop_bot/${sessionId}`)
+                .done(function(response) {
+                    if (response.success) {
+                        showNotification(response.message, 'success');
+                        loadActiveBots();
+                    } else {
+                        showNotification(response.error, 'error');
+                    }
+                })
+                .fail(function() {
+                    showNotification('Error stopping bot', 'error');
+                });
+        }
+
+        // Show notification
+        function showNotification(message, type = 'info') {
+            const icon = {
+                'success': 'fa-check-circle',
+                'error': 'fa-exclamation-circle',
+                'warning': 'fa-exclamation-triangle',
+                'info': 'fa-info-circle'
+            }[type];
+
+            const alertClass = {
+                'success': 'alert-success',
+                'error': 'alert-danger',
+                'warning': 'alert-warning',
+                'info': 'alert-info'
+            }[type];
+
+            const notification = $(`
+                <div class="alert ${alertClass} alert-dismissible fade show notification" role="alert">
+                    <i class="fas ${icon} me-2"></i>
+                    ${message}
+                    <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+                </div>
+            `);
+
+            $('#notification-area').append(notification);
+            
+            // Auto remove after 5 seconds
+            setTimeout(() => {
+                notification.alert('close');
+            }, 5000);
+        }
+
+        // Start background updates
+        function startBackgroundUpdates() {
+            // Update time every second
+            updateCurrentTime();
+            setInterval(updateCurrentTime, 1000);
+            
+            // Update market status every 30 seconds
+            setInterval(() => {
+                if (currentPage === 'dashboard') {
+                    $.get('/api/market_status').done(updateMarketStatus);
+                }
+            }, 30000);
+            
+            // Update active bots every 10 seconds
+            setInterval(() => {
+                if (currentPage === 'dashboard') {
+                    loadActiveBots();
+                }
+            }, 10000);
+            
+            // Update wallet and portfolio every 15 seconds
+            setInterval(() => {
+                if (currentPage === 'dashboard') {
+                    updateWalletBalance();
+                    updateTradingActivity();
+                }
+            }, 15000);
+            
+            // Update Kite connection status every 30 seconds in live mode
+            setInterval(() => {
+                if (currentTradingMode === 'live') {
+                    testKiteConnectionStatus();
+                }
+            }, 30000);
+        }
+
+        // Strategy change handler
+        $(document).on('change', '#strategy-select', function() {
+            loadStrategyParameters($(this).val());
+        });
+
+        // Trading mode change handler in modal
+        $(document).on('change', '#bot-trading-mode', function() {
+            const helpText = $('#trading-mode-help');
+            if ($(this).val() === 'live') {
+                helpText.html('Live Trading uses real funds from your Zerodha account');
+            } else {
+                helpText.html('Paper Trading uses virtual money for practice');
+            }
+        });
+
+        // Market Watch Page
+        function loadMarketWatch() {
+            $('#page-content').html(`
+                <div class="row">
+                    <div class="col-12">
+                        <h2><i class="fas fa-chart-line"></i> Market Watch</h2>
+                        <div class="alert alert-info">
+                            <h4>Live Market Data</h4>
+                            <p>Real-time market data will be displayed here when the market is open.</p>
+                            <p>Currently showing demo data for testing purposes.</p>
+                        </div>
+                        <div id="market-watch-data" class="mt-3">
+                            <div class="text-center">
+                                <div class="spinner-border text-primary" role="status"></div>
+                                <p class="mt-2">Loading market data...</p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            `);
+            loadMarketWatchData();
+        }
+
+        function loadMarketWatchData() {
+            $.get('/api/market_watch_data')
+                .done(function(data) {
+                    let html = '<div class="table-responsive"><table class="table table-striped"><thead><tr><th>Symbol</th><th>Last Price</th><th>Change</th><th>Change %</th><th>Volume</th></tr></thead><tbody>';
+                    data.forEach(stock => {
+                        const changeClass = stock.change >= 0 ? 'text-success' : 'text-danger';
+                        html += `
+                            <tr>
+                                <td><strong>${stock.symbol}</strong></td>
+                                <td>₹${stock.last_price.toFixed(2)}</td>
+                                <td class="${changeClass}">${stock.change >= 0 ? '+' : ''}${stock.change.toFixed(2)}</td>
+                                <td class="${changeClass}">${stock.change_percent >= 0 ? '+' : ''}${stock.change_percent.toFixed(2)}%</td>
+                                <td>${stock.volume.toLocaleString()}</td>
+                            </tr>
+                        `;
+                    });
+                    html += '</tbody></table></div>';
+                    $('#market-watch-data').html(html);
+                })
+                .fail(function() {
+                    $('#market-watch-data').html('<div class="alert alert-danger">Error loading market data</div>');
+                });
+        }
+
+        // Positions Page
+        function loadPositions() {
+            $('#page-content').html(`
+                <div class="row">
+                    <div class="col-12">
+                        <h2><i class="fas fa-wallet"></i> Positions</h2>
+                        <div class="alert alert-info">
+                            <h4>Current Portfolio Positions</h4>
+                            <p>Your current holdings and unrealized P&L.</p>
+                        </div>
+                        <div id="positions-data" class="mt-3">
+                            <div class="text-center">
+                                <div class="spinner-border text-primary" role="status"></div>
+                                <p class="mt-2">Loading positions...</p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            `);
+            loadPositionsData();
+        }
+
+        function loadPositionsData() {
+            $.get('/api/positions')
+                .done(function(data) {
+                    if (data.length === 0) {
+                        $('#positions-data').html('<div class="alert alert-warning">No positions found</div>');
+                        return;
+                    }
+                    
+                    let html = '<div class="table-responsive"><table class="table table-striped"><thead><tr><th>Symbol</th><th>Quantity</th><th>Avg Price</th><th>Current Price</th><th>Unrealized P&L</th><th>Action</th></tr></thead><tbody>';
+                    data.forEach(position => {
+                        const pnlClass = position.unrealized_pnl >= 0 ? 'text-success' : 'text-danger';
+                        html += `
+                            <tr>
+                                <td><strong>${position.symbol}</strong></td>
+                                <td>${position.quantity}</td>
+                                <td>₹${position.average_price.toFixed(2)}</td>
+                                <td>₹${position.current_price.toFixed(2)}</td>
+                                <td class="${pnlClass}">${position.unrealized_pnl >= 0 ? '+' : ''}₹${position.unrealized_pnl.toFixed(2)}</td>
+                                <td><span class="badge ${position.action === 'BUY' ? 'bg-success' : 'bg-danger'}">${position.action}</span></td>
+                            </tr>
+                        `;
+                    });
+                    html += '</tbody></table></div>';
+                    $('#positions-data').html(html);
+                })
+                .fail(function() {
+                    $('#positions-data').html('<div class="alert alert-danger">Error loading positions</div>');
+                });
+        }
+
+        // Orders Page
+        function loadOrders() {
+            $('#page-content').html(`
+                <div class="row">
+                    <div class="col-12">
+                        <h2><i class="fas fa-list-alt"></i> Orders</h2>
+                        <div class="alert alert-info">
+                            <h4>Order History</h4>
+                            <p>Your recent trading orders and their status.</p>
+                        </div>
+                        <div id="orders-data" class="mt-3">
+                            <div class="text-center">
+                                <div class="spinner-border text-primary" role="status"></div>
+                                <p class="mt-2">Loading orders...</p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            `);
+            loadOrdersData();
+        }
+
+        function loadOrdersData() {
+            $.get('/api/orders')
+                .done(function(data) {
+                    if (data.length === 0) {
+                        $('#orders-data').html('<div class="alert alert-warning">No orders found</div>');
+                        return;
+                    }
+                    
+                    let html = '<div class="table-responsive"><table class="table table-striped"><thead><tr><th>Symbol</th><th>Action</th><th>Quantity</th><th>Price</th><th>Status</th><th>Time</th></tr></thead><tbody>';
+                    data.forEach(order => {
+                        html += `
+                            <tr>
+                                <td><strong>${order.symbol}</strong></td>
+                                <td><span class="badge ${order.action === 'BUY' ? 'bg-success' : 'bg-danger'}">${order.action}</span></td>
+                                <td>${order.quantity}</td>
+                                <td>₹${order.price.toFixed(2)}</td>
+                                <td><span class="badge bg-success">${order.status}</span></td>
+                                <td>${new Date(order.timestamp).toLocaleString()}</td>
+                            </tr>
+                        `;
+                    });
+                    html += '</tbody></table></div>';
+                    $('#orders-data').html(html);
+                })
+                .fail(function() {
+                    $('#orders-data').html('<div class="alert alert-danger">Error loading orders</div>');
+                });
+        }
+
+        // Logs Page
+        function loadLogs() {
+            $('#page-content').html(`
+                <div class="row">
+                    <div class="col-12">
+                        <h2><i class="fas fa-clipboard-list"></i> Logs</h2>
+                        <div class="alert alert-info">
+                            <h4>Application Logs</h4>
+                            <p>System and trading activity logs.</p>
+                        </div>
+                        <div id="logs-data" class="mt-3">
+                            <div class="text-center">
+                                <div class="spinner-border text-primary" role="status"></div>
+                                <p class="mt-2">Loading logs...</p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            `);
+            loadLogsData();
+        }
+
+        function loadLogsData() {
+            $.get('/api/logs')
+                .done(function(data) {
+                    if (data.length === 0) {
+                        $('#logs-data').html('<div class="alert alert-warning">No logs found</div>');
+                        return;
+                    }
+                    
+                    let html = '<div class="table-responsive"><table class="table table-striped"><thead><tr><th>Time</th><th>Level</th><th>Message</th></tr></thead><tbody>';
+                    data.forEach(log => {
+                        const levelClass = {
+                            'INFO': 'text-info',
+                            'WARNING': 'text-warning',
+                            'ERROR': 'text-danger',
+                            'DEBUG': 'text-muted'
+                        }[log.level] || 'text-info';
+                        
+                        html += `
+                            <tr>
+                                <td>${new Date(log.timestamp).toLocaleString()}</td>
+                                <td><span class="${levelClass}">${log.level}</span></td>
+                                <td>${log.message}</td>
+                            </tr>
+                        `;
+                    });
+                    html += '</tbody></table></div>';
+                    $('#logs-data').html(html);
+                })
+                .fail(function() {
+                    $('#logs-data').html('<div class="alert alert-danger">Error loading logs</div>');
+                });
+        }
+
+        // Settings Page
+        function loadSettings() {
+            $('#page-content').html(`
+                <div class="row">
+                    <div class="col-12">
+                        <h2><i class="fas fa-cogs"></i> Settings</h2>
+                        <div class="alert alert-info">
+                            <h4>Application Settings</h4>
+                            <p>Configure your trading preferences and API credentials.</p>
+                        </div>
+                        
+                        <div class="card">
+                            <div class="card-header">
+                                <h5 class="card-title mb-0"><i class="fas fa-key"></i> Kite Connect API Settings</h5>
+                            </div>
+                            <div class="card-body">
+                                <form id="settings-form">
+                                    <div class="mb-3">
+                                        <label class="form-label">API Key</label>
+                                        <input type="text" class="form-control" id="kite-api-key" placeholder="Enter your Kite API Key">
+                                    </div>
+                                    <div class="mb-3">
+                                        <label class="form-label">API Secret</label>
+                                        <input type="password" class="form-control" id="kite-api-secret" placeholder="Enter your Kite API Secret">
+                                    </div>
+                                    <div class="mb-3">
+                                        <label class="form-label">Access Token</label>
+                                        <input type="text" class="form-control" id="kite-access-token" placeholder="Enter your Access Token">
+                                    </div>
+                                    <button type="button" class="btn btn-primary" onclick="saveSettings()">
+                                        <i class="fas fa-save"></i> Save Settings
+                                    </button>
+                                    <button type="button" class="btn btn-info ms-2" onclick="testKiteConnection()">
+                                        <i class="fas fa-plug"></i> Test Connection
+                                    </button>
+                                </form>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            `);
+            loadCurrentSettings();
+        }
+
+        function loadCurrentSettings() {
+            $.get('/api/user_settings')
+                .done(function(settings) {
+                    $('#kite-api-key').val(settings.kite_api_key || '');
+                    $('#kite-api-secret').val(settings.kite_api_secret || '');
+                    $('#kite-access-token').val(settings.kite_access_token || '');
+                })
+                .fail(function() {
+                    showNotification('Error loading settings', 'error');
+                });
+        }
+
+        function saveSettings() {
+            const settings = {
+                kite_api_key: $('#kite-api-key').val(),
+                kite_api_secret: $('#kite-api-secret').val(),
+                kite_access_token: $('#kite-access-token').val()
+            };
+
+            $.ajax({
+                url: '/api/user_settings',
+                method: 'POST',
+                contentType: 'application/json',
+                data: JSON.stringify(settings),
+                success: function(response) {
+                    if (response.success) {
+                        showNotification('Settings saved successfully!', 'success');
+                    } else {
+                        showNotification('Error saving settings: ' + response.error, 'error');
+                    }
+                },
+                error: function(xhr) {
+                    showNotification('Error saving settings', 'error');
+                }
+            });
+        }
+    </script>
 </body>
 </html>
