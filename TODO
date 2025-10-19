@@ -1,0 +1,13 @@
+please read the code and understand. Post that below are the issues that need to be fixed ASAP
+
+1. Once the app is launched and web page is accessed it shows Market status as LOADING....
+2. Current time is incorrect and its stuck at some point
+3. No feedback on any button clicked. add the feedback to all the button respectively
+4. On the nav bar non of the weblinks are working as when clicked no page opens.
+5. Active bots are not working
+6. The code is not placing any orders nethier sell. 
+
+
+So now fix all the error and make the necessay renhancement from the backend and frontend prospect and make it production ready. make sure it places the orders as per the market status like open then live and market close then paper trade simulation. Also make sure that we have a feedback on the connectivity to zerodha api using keys, tokens and secrets etc....
+
+Ask me any question on any doubt
