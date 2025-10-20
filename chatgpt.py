@@ -426,24 +426,29 @@ class LiveTrading:
         self.kite = None
     
     def initialize(self, api_key: str, access_token: str) -> bool:
-        """Initialize Kite connection"""
+        """Initialize Kite connection (idempotent)."""
         try:
             try:
                 from kiteconnect import KiteConnect
-                from kiteconnect.exceptions import KiteException
+                from kiteconnect.exceptions import KiteException, TokenException
             except ImportError:
                 print("⚠️  kiteconnect not installed. Live trading disabled.")
                 return False
-            
+
+            # Reuse if already initialized with a valid token
+            if getattr(self, "kite", None):
+                try:
+                    self.kite.profile()
+                    return True
+                except Exception:
+                    pass  # fall through to re-init
+
             self.kite = KiteConnect(api_key=api_key)
             self.kite.set_access_token(access_token)
-            
-            profile = self.kite.profile()
-            if profile:
-                print(f"✅ Kite Connect initialized for user: {profile.get('user_name', 'Unknown')}")
-                return True
-            return False
-            
+            self.kite.profile()  # verify
+            print("✅ Kite Connect initialized (profile OK)")
+            return True
+
         except Exception as e:
             print(f"❌ Kite initialization error: {e}")
             self.kite = None
@@ -453,69 +458,81 @@ class LiveTrading:
         """Get account margins"""
         try:
             if self.kite:
-                return self.kite.margins()
+                # Explicit segment for clarity
+                return self.kite.margins('equity')
             return None
         except Exception as e:
             print(f"Error getting margins: {e}")
             return None
     
-    def get_holdings(self) -> Dict[str, Any]:
+    def get_holdings(self) -> List[Dict[str, Any]]:
         """Get current holdings"""
         try:
             if self.kite:
-                return self.kite.holdings()
-            return None
+                return self.kite.holdings() or []
+            return []
         except Exception as e:
             print(f"Error getting holdings: {e}")
-            return None
+            return []
     
     def get_positions(self) -> Dict[str, Any]:
         """Get current positions"""
         try:
             if self.kite:
-                return self.kite.positions()
-            return None
+                return self.kite.positions() or {}
+            return {}
         except Exception as e:
             print(f"Error getting positions: {e}")
-            return None
+            return {}
     
     def get_live_balance(self) -> Dict[str, Any]:
-        """Get actual live balance from Zerodha"""
+        """Get actual live balance and portfolio value from Zerodha using last_price."""
         try:
             if not self.kite:
                 return {'success': False, 'error': 'Kite not initialized'}
-            
-            margins = self.get_margins()
-            if not margins:
-                return {'success': False, 'error': 'Could not fetch margins'}
-            
-            holdings = self.get_holdings()
-            positions = self.get_positions()
-            
-            equity_margins = margins.get('equity', {})
-            available_cash = equity_margins.get('available', {}).get('cash', 0.0)
-            
-            portfolio_value = available_cash
-            
-            if holdings:
-                for holding in holdings:
-                    portfolio_value += holding.get('quantity', 0) * holding.get('average_price', 0)
-            
-            if positions and 'net' in positions:
-                for position in positions['net']:
-                    portfolio_value += position.get('quantity', 0) * position.get('average_price', 0)
-            
+
+            eq = self.kite.margins('equity')  # dict with 'available', 'utilised', etc.
+
+            available_cash = float(eq.get('available', {}).get('cash', 0.0) or 0.0)
+            collateral = float(eq.get('available', {}).get('collateral', 0.0) or 0.0)
+            debits = float(eq.get('utilised', {}).get('debits', 0.0) or 0.0)
+            net_available = max(0.0, available_cash + collateral - debits)
+
+            holdings = self.kite.holdings() or []
+            positions = self.kite.positions() or {}
+
+            portfolio_value = net_available
+
+            # Value holdings at last_price if present else average_price
+            for h in holdings:
+                qty = float(h.get('quantity', 0) or 0)
+                lp = h.get('last_price', None)
+                ap = h.get('average_price', 0.0) or 0.0
+                price = float(lp if lp not in (None, 0) else ap)
+                portfolio_value += qty * price
+
+            # Value net positions at last_price
+            net_positions = positions.get('net', []) if isinstance(positions, dict) else []
+            for p in net_positions:
+                qty = float(p.get('quantity', 0) or 0)
+                lp = float(p.get('last_price', 0.0) or 0.0)
+                price = lp
+                portfolio_value += qty * price
+
             return {
                 'success': True,
-                'available_cash': available_cash,
+                'available_cash': net_available,
                 'portfolio_value': portfolio_value,
-                'margins': equity_margins,
-                'holdings_count': len(holdings) if holdings else 0,
-                'positions_count': len(positions.get('net', [])) if positions else 0
+                'margins': eq,
+                'holdings_count': len(holdings),
+                'positions_count': len(net_positions)
             }
-            
+
         except Exception as e:
-            return {'success': False, 'error': str(e)}
+            msg = str(e)
+            if 'TokenException' in msg or 'Invalid session' in msg:
+                return {'success': False, 'error': 'Zerodha access token expired. Please re-login to generate a fresh access token.'}
+            return {'success': False, 'error': msg}
     
     def place_order(self, symbol: str, action: str, quantity: int, price: float) -> Dict[str, Any]:
         """Place live order"""
@@ -544,16 +561,19 @@ live_trading = LiveTrading()
 
 # --- Live Quotes Helpers ---
 
+def _simulated_prices_for(symbols: List[str]) -> Dict[str, float]:
+    out = {}
+    for s in symbols:
+        base_price = 1000 + (hash(s) % 5000)
+        variation = random.uniform(-0.05, 0.05)
+        out[s] = round(base_price * (1 + variation), 2)
+    return out
+
 def get_live_quotes_via_kite(symbols: List[str]) -> Dict[str, float]:
-    """
-    Fetch LTP from Zerodha for NSE equities: ['RELIANCE', 'TCS', ...]
-    Returns { 'RELIANCE': 2543.4, ... }
-    Falls back to {} if kite not ready or on error.
-    """
+    """Fetch LTP for NSE equities, returns { 'RELIANCE': 2543.4, ... }."""
     try:
-        # Ensure kite is initialized
+        # Ensure kite is initialized (reuse if possible)
         if not live_trading.kite:
-            # Try initialize from current user's settings if available
             if current_user.is_authenticated:
                 settings = UserSettings.query.filter_by(user_id=current_user.id).first()
                 if not settings or not settings.kite_api_key or not settings.kite_access_token:
@@ -565,28 +585,25 @@ def get_live_quotes_via_kite(symbols: List[str]) -> Dict[str, float]:
 
         instruments = []
         for s in symbols:
-            if ":" in s:
-                instruments.append(s)
-            else:
-                instruments.append(f"NSE:{s}")
+            s = s.upper()
+            instruments.append(s if ":" in s else f"NSE:{s}")
 
-        data = live_trading.kite.ltp(instruments)  # {'NSE:RELIANCE': {'last_price': ...}, ...}
+        if not instruments:
+            return {}
+
+        data = live_trading.kite.ltp(instruments)  # {'NSE:RELIANCE': {'last_price': ...}}
         out = {}
         for k, v in data.items():
             sym = k.split(":", 1)[-1]
-            out[sym] = float(v.get("last_price", 0.0))
+            lp = v.get("last_price", None)
+            if lp is None:
+                continue
+            out[sym] = float(lp)
         return out
+
     except Exception as e:
         print(f"❌ get_live_quotes_via_kite error: {e}")
         return {}
-
-def _simulated_prices_for(symbols: List[str]) -> Dict[str, float]:
-    out = {}
-    for s in symbols:
-        base_price = 1000 + (hash(s) % 5000)
-        variation = random.uniform(-0.05, 0.05)
-        out[s] = round(base_price * (1 + variation), 2)
-    return out
 
 def get_prices_for_symbols(symbols: List[str], prefer_live: bool = True) -> Dict[str, float]:
     if not symbols:
@@ -595,13 +612,11 @@ def get_prices_for_symbols(symbols: List[str], prefer_live: bool = True) -> Dict
     if prefer_live:
         live = get_live_quotes_via_kite(symbols_up)
         if live:
-            # merge live with simulated for any missing symbols
             merged = dict(live)
             missing = [s for s in symbols_up if s not in merged]
             if missing:
                 merged.update(_simulated_prices_for(missing))
             return merged
-    # all simulated
     return _simulated_prices_for(symbols_up)
 
 def get_current_prices(prefer_live: bool = True, instrument_type: str = 'stocks') -> Dict[str, float]:
@@ -753,7 +768,7 @@ def test_kite_connection(settings) -> Dict[str, Any]:
                 kite = KiteConnect(api_key=settings.kite_api_key)
                 kite.set_access_token(settings.kite_access_token)
                 profile = kite.profile()
-                margins = kite.margins()
+                margins = kite.margins('equity')
                 
                 if profile:
                     return {
@@ -786,30 +801,40 @@ def get_top_symbols(instrument_type: str, count: int = 20) -> List[str]:
     else:
         return ['NIFTY', 'BANKNIFTY', 'RELIANCE', 'TCS', 'INFY', 'HDFC', 'SBIN']
 
-# --- WebSocket Market Streamer (3s cadence) ---
+# --- WebSocket Market Streamer (1s cadence, aggregated) ---
 
 _subscribers = defaultdict(set)  # sid -> set(symbols)
 _streamer_running = False
 _streamer_lock = threading.Lock()
 
 def _market_streamer():
-    """Background task that emits market data every 3s to each subscriber."""
+    """Background task that emits market data every 1s to each subscriber, aggregating symbols."""
     global _streamer_running
     try:
         while True:
             if not _subscribers:
-                time_module.sleep(1.0)
+                time_module.sleep(0.5)
                 continue
 
-            snapshot = {sid: list(symbols) for sid, symbols in list(_subscribers.items())}
+            # Aggregate unique symbols across all subscribers
+            all_symbols = set()
+            snapshot = {}
+            for sid, symbols in list(_subscribers.items()):
+                syms = list(symbols)
+                snapshot[sid] = syms
+                all_symbols.update(syms)
+
+            # One LTP call for all symbols (fallback to simulated for any missing)
+            prices_all = get_prices_for_symbols(list(all_symbols), prefer_live=True)
+            ts = now_ist().isoformat()
+
+            # Build & emit per-subscriber batches
             for sid, symbols in snapshot.items():
                 if not symbols:
                     continue
-                prices = get_prices_for_symbols(symbols, prefer_live=True)
                 batch = {}
-                ts = now_ist().isoformat()
                 for s in symbols:
-                    lp = prices.get(s)
+                    lp = prices_all.get(s)
                     if lp is None:
                         continue
                     batch[s] = {
@@ -818,10 +843,11 @@ def _market_streamer():
                         'volume': random.randint(100000, 1000000),
                         'timestamp': ts
                     }
-                # emit only to that socket id (room=sid)
-                socketio.emit('market_data_batch', batch, room=sid)
-            # refresh cadence: 3 seconds
-            time_module.sleep(3.0)
+                if batch:
+                    socketio.emit('market_data_batch', batch, room=sid)
+
+            # refresh cadence: 1 second
+            time_module.sleep(1.0)
     except Exception as e:
         print(f"❌ market streamer error: {e}")
     finally:
@@ -1096,7 +1122,7 @@ def wallet_balance():
             if live_trading.initialize(settings.kite_api_key, settings.kite_access_token):
                 balance_data = live_trading.get_live_balance()
                 
-                if balance_data['success']:
+                if balance_data.get('success'):
                     return jsonify({
                         'balance': balance_data['available_cash'],
                         'portfolio_value': balance_data['portfolio_value'],
@@ -1113,7 +1139,7 @@ def wallet_balance():
                     })
                 else:
                     return jsonify({
-                        'error': f'Failed to fetch Zerodha balance: {balance_data.get("error", "Unknown error")}',
+                        'error': balance_data.get('error', 'Failed to fetch Zerodha balance'),
                         'balance': 0,
                         'portfolio_value': 0,
                         'realized_pnl': 0,
@@ -1765,28 +1791,6 @@ def get_orders():
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
-@app.route('/api/logs')
-@login_required
-def get_logs():
-    """Get application logs"""
-    try:
-        limit = request.args.get('limit', 100, type=int)
-        logs = Log.query.filter_by(user_id=current_user.id).order_by(Log.timestamp.desc()).limit(limit).all()
-        
-        logs_data = []
-        for log in logs:
-            logs_data.append({
-                'id': log.id,
-                'message': log.message,
-                'level': log.level,
-                'timestamp': log.timestamp.isoformat() if log.timestamp else None
-            })
-        
-        return jsonify(logs_data)
-    
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
 @app.route('/api/portfolio_summary')
 @login_required
 def get_portfolio_summary():
@@ -2157,7 +2161,7 @@ def run_enhanced_trading_bot(session_id: int, config: Dict[str, Any], trading_se
                     print(f"🛑 Database stop flags detected. Exiting immediately.")
                     break
                     
-                # Use shorter sleep with interruptible sleep => 3 seconds total
+                # Use shorter sleep with interruptible sleep => ~3 seconds total (used by strategy loop)
                 for i in range(30):  # 30 * 0.1 = 3 seconds total
                     if trading_session.should_stop:
                         print(f"🛑 Stop detected during sleep. Breaking out.")
@@ -2218,7 +2222,7 @@ def handle_disconnect():
 
 @socketio.on('subscribe_market_data')
 def handle_subscribe_market_data(data):
-    """Subscribe to market data updates (every 3 seconds via streamer)"""
+    """Subscribe to market data updates (every 1 second via streamer)"""
     symbols = data.get('symbols', [])
     if symbols:
         norm = [s.upper() for s in symbols]
