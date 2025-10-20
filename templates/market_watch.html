@@ -8,17 +8,28 @@
                 <h5 class="card-title mb-0">
                     <i class="fas fa-chart-line"></i> Live Market Watch
                 </h5>
-                <div>
+                <div class="d-flex gap-3 align-items-center">
+                    <span id="connection-status" class="badge bg-secondary">Connecting...</span>
+                    
+                    <div class="d-flex align-items-center gap-2">
+                        <label for="refreshInterval" class="form-label mb-0 small">Interval:</label>
+                        <select class="form-select form-select-sm" id="refreshInterval" onchange="changeInterval()">
+                            <option value="1">1s</option>
+                            <option value="2">2s</option>
+                            <option value="5" selected>5s</option>
+                            <option value="10">10s</option>
+                        </select>
+                    </div>
+
                     <select class="form-select form-select-sm" id="instrumentFilter" onchange="filterMarketData()">
-                        <option value="all">All Instruments</option>
                         <option value="stocks">Stocks</option>
-                        <option value="fno">F&O</option>
+                        <option value="indices">Indices</option>
                     </select>
                 </div>
             </div>
             <div class="card-body">
                 <div class="table-responsive">
-                    <table class="table table-striped table-hover" id="marketWatchTable">
+                    <table class="table table-striped table-hover table-sm" id="marketWatchTable">
                         <thead>
                             <tr>
                                 <th>Symbol</th>
@@ -35,8 +46,10 @@
                         <tbody id="marketWatchBody">
                             <tr>
                                 <td colspan="9" class="text-center text-muted">
-                                    <div class="loading-spinner"></div>
-                                    Loading market data...
+                                    <div class="spinner-border spinner-border-sm" role="status">
+                                        <span class="visually-hidden">Loading...</span>
+                                    </div>
+                                    Loading initial market data...
                                 </td>
                             </tr>
                         </tbody>
@@ -49,59 +62,114 @@
 {% endblock %}
 
 {% block scripts %}
+<style>
+    .price-flash { transition: background-color 0.1s ease-in-out; }
+    .price-up { background-color: rgba(40, 167, 69, 0.2); }
+    .price-down { background-color: rgba(220, 53, 69, 0.2); }
+    .text-success { color: #28a745 !important; }
+    .text-danger { color: #dc3545 !important; }
+</style>
+
 <script>
-    function updateMarketWatch(data) {
-        const tbody = document.getElementById('marketWatchBody');
-        let row = document.getElementById(`row-${data.symbol}`);
-        const changeClass = data.change >= 0 ? 'market-up' : 'market-down';
+    const socket = io();
+    const marketWatchBody = document.getElementById('marketWatchBody');
+    const connectionStatusEl = document.getElementById('connection-status');
+    const refreshIntervalEl = document.getElementById('refreshInterval');
+
+    function updateRow(item) {
+        const changeClass = item.change >= 0 ? 'text-success' : 'text-danger';
+        const changeIcon = item.change >= 0 ? '▲' : '▼';
+        let row = document.getElementById(`row-${item.symbol}`);
+
+        const newRowHTML = `
+            <td><strong>${item.symbol}</strong></td>
+            <td class="fw-bold">${item.last_price.toFixed(2)}</td>
+            <td class="${changeClass}">${changeIcon} ${Math.abs(item.change).toFixed(2)}</td>
+            <td class="${changeClass}">${Math.abs(item.change_percent).toFixed(2)}%</td>
+            <td>${(item.volume || 0).toLocaleString()}</td>
+            <td>${(item.open || 0).toFixed(2)}</td>
+            <td>${(item.high || 0).toFixed(2)}</td>
+            <td>${(item.low || 0).toFixed(2)}</td>
+            <td>${(item.close || 0).toFixed(2)}</td>
+        `;
 
         if (!row) {
             row = document.createElement('tr');
-            row.id = `row-${data.symbol}`;
-            row.className = 'price-update';
-            row.innerHTML = `
-                <td><strong>${data.symbol}</strong></td>
-                <td>${data.last_price.toFixed(2)}</td>
-                <td class="${changeClass}">${data.change.toFixed(2)}</td>
-                <td class="${changeClass}">${data.change_percent.toFixed(2)}%</td>
-                <td>${data.volume.toLocaleString()}</td>
-                <td>${data.open.toFixed(2)}</td>
-                <td>${data.high.toFixed(2)}</td>
-                <td>${data.low.toFixed(2)}</td>
-                <td>${data.close.toFixed(2)}</td>
-            `;
-            tbody.appendChild(row);
+            row.id = `row-${item.symbol}`;
+            marketWatchBody.appendChild(row);
         } else {
-            row.className = 'price-update';
-            const cells = row.getElementsByTagName('td');
-            cells[1].textContent = data.last_price.toFixed(2);
-            cells[2].textContent = data.change.toFixed(2);
-            cells[2].className = changeClass;
-            cells[3].textContent = data.change_percent.toFixed(2) + '%';
-            cells[3].className = changeClass;
-            cells[4].textContent = data.volume.toLocaleString();
+            const oldPrice = parseFloat(row.cells[1].textContent);
+            if (oldPrice !== item.last_price) {
+                const priceFlashClass = item.last_price > oldPrice ? 'price-up' : 'price-down';
+                row.classList.add('price-flash', priceFlashClass);
+                setTimeout(() => row.classList.remove('price-up', 'price-down'), 500);
+            }
         }
-
-        setTimeout(() => {
-            if (row) row.className = '';
-        }, 1000);
+        
+        row.innerHTML = newRowHTML;
     }
 
-    // Socket.io for real-time data
-    socket.on('market_data_update', function(data) {
-        updateMarketWatch(data);
-    });
-
-    // Load initial market data
-    fetch('/api/market_watch_data')
-        .then(response => response.json())
-        .then(data => {
-            data.forEach(updateMarketWatch);
-        });
+    function initialLoad() {
+        fetch(`/api/market_watch_data?type=${document.getElementById('instrumentFilter').value}`)
+            .then(response => response.json())
+            .then(data => {
+                marketWatchBody.innerHTML = '';
+                if (data && data.length > 0) {
+                    data.forEach(updateRow);
+                } else {
+                    marketWatchBody.innerHTML = '<tr><td colspan="9" class="text-center text-muted">No market data available.</td></tr>';
+                }
+            })
+            .catch(error => {
+                console.error('Error fetching initial market data:', error);
+                marketWatchBody.innerHTML = '<tr><td colspan="9" class="text-center text-danger">Error loading market data.</td></tr>';
+            });
+    }
 
     function filterMarketData() {
-        const filter = document.getElementById('instrumentFilter').value;
-        // Implementation for filtering
+        marketWatchBody.innerHTML = '<tr><td colspan="9" class="text-center text-muted">Loading...</td></tr>';
+        initialLoad();
     }
+
+    // --- NEW FUNCTION TO CHANGE REFRESH INTERVAL ---
+    function changeInterval() {
+        const interval = refreshIntervalEl.value;
+        console.log(`Requesting refresh interval change to: ${interval}s`);
+        socket.emit('set_refresh_interval', { interval: interval });
+    }
+
+    // --- Socket.IO Event Handlers ---
+    socket.on('connect', () => {
+        console.log('Connected to server!');
+        connectionStatusEl.textContent = 'Live';
+        connectionStatusEl.className = 'badge bg-success';
+        // Set the initial interval on connect
+        changeInterval();
+    });
+
+    socket.on('disconnect', () => {
+        console.log('Disconnected from server!');
+        connectionStatusEl.textContent = 'Disconnected';
+        connectionStatusEl.className = 'badge bg-danger';
+    });
+
+    socket.on('market_update', (data) => {
+        const filter = document.getElementById('instrumentFilter').value;
+        for (const symbol in data) {
+            const item = data[symbol];
+            const itemType = (item.symbol.includes('NIFTY')) ? 'indices' : 'stocks';
+            if (filter === itemType) {
+                 updateRow(item);
+            }
+        }
+    });
+
+    // --- NEW HANDLER TO CONFIRM INTERVAL CHANGE ---
+    socket.on('interval_updated', (data) => {
+        console.log(`Server confirmed refresh interval is now: ${data.interval}s`);
+        // You could add a visual confirmation here if you want
+    });
+
+    document.addEventListener('DOMContentLoaded', initialLoad);
 </script>
 {% endblock %}
