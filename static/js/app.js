@@ -289,6 +289,103 @@ class TradingBotApp {
         }
     }
 
+    updatePositionsTable(positions) {
+        const tbody = document.getElementById('positionsTable');
+        if (!tbody) return;
+
+        if (positions.length === 0) {
+            tbody.innerHTML = `
+                <tr>
+                    <td colspan="6" class="text-center text-muted py-4">
+                        <i class="fas fa-chart-line fa-2x mb-2"></i>
+                        <p>No positions found</p>
+                    </td>
+                </tr>
+            `;
+            return;
+        }
+
+        tbody.innerHTML = positions.map(position => {
+            const unrealizedPnl = position.unrealized_pnl || 0;
+            const action = this.calculatePositionAction(position);
+            
+            return `
+                <tr>
+                    <td><strong>${position.symbol}</strong></td>
+                    <td>${position.quantity}</td>
+                    <td>₹${position.average_price.toFixed(2)}</td>
+                    <td>₹${position.current_price.toFixed(2)}</td>
+                    <td class="${unrealizedPnl >= 0 ? 'market-up' : 'market-down'}">
+                        ₹${unrealizedPnl.toFixed(2)}
+                    </td>
+                    <td>
+                        <span class="badge ${this.getActionBadgeClass(action)}">${action}</span>
+                    </td>
+                </tr>
+            `;
+        }).join('');
+    }
+
+    calculatePositionAction(position) {
+        const unrealizedPnl = position.unrealized_pnl || 0;
+        const pnlPercent = (unrealizedPnl / position.invested_amount) * 100;
+
+        // Define action based on P&L percentage
+        if (pnlPercent >= 5) {
+            return 'SELL'; // Good profit, take gains
+        } else if (pnlPercent <= -3) {
+            return 'BUY'; // Good dip, average down
+        } else if (pnlPercent <= -8) {
+            return 'SELL'; // Stop loss
+        } else {
+            return 'HOLD'; // Neutral position
+        }
+    }
+
+    getActionBadgeClass(action) {
+        switch (action) {
+            case 'BUY': return 'bg-success';
+            case 'SELL': return 'bg-danger';
+            case 'HOLD': return 'bg-secondary';
+            default: return 'bg-secondary';
+        }
+    }
+
+    updateOrdersTable(orders) {
+        const tbody = document.getElementById('ordersTable');
+        if (!tbody) return;
+
+        if (orders.length === 0) {
+            tbody.innerHTML = `
+                <tr>
+                    <td colspan="7" class="text-center text-muted py-4">
+                        <i class="fas fa-receipt fa-2x mb-2"></i>
+                        <p>No orders found</p>
+                    </td>
+                </tr>
+            `;
+            return;
+        }
+
+        tbody.innerHTML = orders.map(order => {
+            const actionClass = order.action === 'BUY' ? 'market-up' : 'market-down';
+            const statusClass = order.status === 'COMPLETED' ? 'badge bg-success' : 
+                              order.status === 'PENDING' ? 'badge bg-warning' : 'badge bg-secondary';
+            
+            return `
+                <tr>
+                    <td>${order.symbol}</td>
+                    <td><span class="${actionClass}">${order.action}</span></td>
+                    <td>${order.quantity}</td>
+                    <td>₹${order.price.toFixed(2)}</td>
+                    <td><span class="${statusClass}">${order.status}</span></td>
+                    <td>${order.product_type}</td>
+                    <td>${new Date(order.timestamp).toLocaleTimeString()}</td>
+                </tr>
+            `;
+        }).join('');
+    }
+
     updateStrategyParameters() {
         const strategySelect = document.getElementById('strategy');
         const paramsContainer = document.getElementById('strategyParams');

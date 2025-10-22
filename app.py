@@ -15,6 +15,7 @@ import requests
 from sqlalchemy import text
 from werkzeug.security import generate_password_hash, check_password_hash
 import random
+import numpy as np
 
 # Add current directory to Python path
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
@@ -65,7 +66,7 @@ class BotSession(db.Model):
     user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
     instrument_type = db.Column(db.String(50), nullable=False, default='stocks')
     strategy_name = db.Column(db.String(100), nullable=False)
-    trading_mode = db.Column(db.String(20), nullable=False, default='live')
+    trading_mode = db.Column(db.String(20), nullable=False, default='paper')
     initial_capital = db.Column(db.Float, nullable=False, default=100000.0)
     current_capital = db.Column(db.Float, default=0.0)
     pnl = db.Column(db.Float, default=0.0)
@@ -81,6 +82,7 @@ class BotSession(db.Model):
     stop_requested = db.Column(db.Boolean, default=False)
     force_stop = db.Column(db.Boolean, default=False)
     order_type = db.Column(db.String(10), default='CNC')  # MIS or CNC
+    risk_level = db.Column(db.Integer, default=50)  # Percentage from 10 to 100
 
     user = db.relationship('User', backref=db.backref('bot_sessions', lazy=True))
 
@@ -98,7 +100,7 @@ class Trade(db.Model):
     product_type = db.Column(db.String(10), default='CNC')  # MIS or CNC
     status = db.Column(db.String(20), default='COMPLETED')
     timestamp = db.Column(db.DateTime, default=datetime.utcnow)
-    trading_mode = db.Column(db.String(20), default='live')
+    trading_mode = db.Column(db.String(20), default='paper')
     order_id = db.Column(db.String(100))
     brokerage = db.Column(db.Float, default=0.0)
 
@@ -127,11 +129,28 @@ class UserSettings(db.Model):
     default_target_profit = db.Column(db.Float, default=5000.0)
     default_max_duration = db.Column(db.Integer, default=8)
     max_capital_usage = db.Column(db.Float, default=0.8)
-    default_order_type = db.Column(db.String(10), default='CNC')  # Default to CNC to avoid MIS blocks
+    default_order_type = db.Column(db.String(10), default='CNC')
+    paper_trading_balance = db.Column(db.Float, default=100000.0)
+    default_risk_level = db.Column(db.Integer, default=50)  # Percentage from 10 to 100
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     user = db.relationship('User', backref=db.backref('settings', uselist=False))
+
+class PaperPosition(db.Model):
+    __tablename__ = 'paper_positions'
+
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
+    symbol = db.Column(db.String(50), nullable=False)
+    quantity = db.Column(db.Integer, nullable=False)
+    average_price = db.Column(db.Float, nullable=False)
+    invested_amount = db.Column(db.Float, nullable=False)
+    product_type = db.Column(db.String(10), default='CNC')
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    user = db.relationship('User', backref=db.backref('paper_positions', lazy=True))
 
 # Enhanced trading session state with thread control
 class TradingSession:
@@ -157,53 +176,62 @@ class LiveTrading:
         self.live_positions = {}  # Track live positions by user_id
         self.mis_blocked_stocks = set()  # Track stocks that have MIS blocks
         self.trade_to_trade_stocks = set()  # Track trade-to-trade stocks
+        self._initialization_lock = threading.Lock()  # Thread safety for initialization
 
     def initialize(self, api_key: str, access_token: str) -> bool:
-        """Initialize Kite connection (cached)"""
-        try:
+        """Initialize Kite connection (cached) with thread safety"""
+        with self._initialization_lock:
             try:
-                from kiteconnect import KiteConnect  # noqa
-            except ImportError:
-                print("⚠️  kiteconnect not installed. Live trading disabled.")
-                return False
+                try:
+                    from kiteconnect import KiteConnect  # noqa
+                except ImportError:
+                    print("⚠️  kiteconnect not installed. Live trading disabled.")
+                    return False
 
-            if self.kite and self._last_api_key == api_key and self._last_access_token == access_token:
-                # Already initialized with same creds
-                return True
-
-            from kiteconnect import KiteConnect
-            self.kite = KiteConnect(api_key=api_key)
-            self.kite.set_access_token(access_token)
-            
-            # Test the connection with a simple API call
-            try:
-                profile = self.kite.profile()
-                if profile:
-                    self._last_api_key = api_key
-                    self._last_access_token = access_token
-                    print(f"✅ Kite Connect initialized for user: {profile.get('user_name', 'Unknown')}")
-                    
-                    # Load trade-to-trade stocks list
-                    self._load_trade_to_trade_stocks()
-                    
-                    return True
-                return False
-            except Exception as api_error:
-                error_msg = str(api_error)
-                if "Invalid api_key" in error_msg or "Invalid access_token" in error_msg:
-                    print(f"❌ INVALID CREDENTIALS: Please check your API Key and Access Token")
-                    # Clear invalid credentials
+                # Clear cache if credentials changed
+                if self.kite and (self._last_api_key != api_key or self._last_access_token != access_token):
+                    print("🔄 Credentials changed, reinitializing Kite connection...")
                     self.kite = None
                     self._last_api_key = None
                     self._last_access_token = None
-                else:
-                    print(f"❌ Kite API error: {error_msg}")
-                return False
 
-        except Exception as e:
-            print(f"❌ Kite initialization error: {e}")
-            self.kite = None
-            return False
+                if self.kite and self._last_api_key == api_key and self._last_access_token == access_token:
+                    # Already initialized with same creds
+                    return True
+
+                from kiteconnect import KiteConnect
+                self.kite = KiteConnect(api_key=api_key)
+                self.kite.set_access_token(access_token)
+                
+                # Test the connection with a simple API call
+                try:
+                    profile = self.kite.profile()
+                    if profile:
+                        self._last_api_key = api_key
+                        self._last_access_token = access_token
+                        print(f"✅ Kite Connect initialized for user: {profile.get('user_name', 'Unknown')}")
+                        
+                        # Load trade-to-trade stocks list
+                        self._load_trade_to_trade_stocks()
+                        
+                        return True
+                    return False
+                except Exception as api_error:
+                    error_msg = str(api_error)
+                    if "Invalid api_key" in error_msg or "Invalid access_token" in error_msg:
+                        print(f"❌ INVALID CREDENTIALS: Please check your API Key and Access Token")
+                        # Clear invalid credentials
+                        self.kite = None
+                        self._last_api_key = None
+                        self._last_access_token = None
+                    else:
+                        print(f"❌ Kite API error: {error_msg}")
+                    return False
+
+            except Exception as e:
+                print(f"❌ Kite initialization error: {e}")
+                self.kite = None
+                return False
 
     def _load_trade_to_trade_stocks(self):
         """Load known trade-to-trade stocks that cannot be traded intraday"""
@@ -538,7 +566,8 @@ class LiveTrading:
 
         except Exception as e:
             print(f"Error getting affordable stocks: {e}")
-            return []
+            # Fallback to popular stocks if API fails
+            return ['RELIANCE', 'TCS', 'INFY', 'HDFC', 'HDFCBANK', 'ICICIBANK', 'SBIN', 'BHARTIARTL', 'KOTAKBANK', 'ITC']
 
     def calculate_zerodha_brokerage(self, trade_value: float, action: str, product_type: str = 'CNC') -> float:
         """
@@ -747,7 +776,8 @@ class LiveTrading:
                     'current_value': position['quantity'] * current_price,
                     'pnl_percent': ((current_price - position['average_price']) / position['average_price']) * 100,
                     'last_order_id': position.get('last_order_id', ''),
-                    'product_type': position.get('product_type', 'CNC')
+                    'product_type': position.get('product_type', 'CNC'),
+                    'action': 'sell'  # FIX: Add action field to prevent undefined
                 })
 
             return positions
@@ -801,8 +831,386 @@ class LiveTrading:
                 'total_invested': 0.0
             }
 
+    def exit_all_positions(self, user_id: int) -> Dict[str, Any]:
+        """Exit all live positions when bot stops"""
+        try:
+            if user_id not in self.live_positions:
+                return {'success': True, 'message': 'No positions to exit', 'exited_positions': 0}
+
+            portfolio = self.live_positions[user_id]
+            if not portfolio:
+                return {'success': True, 'message': 'No positions to exit', 'exited_positions': 0}
+
+            print(f"🛑 Exiting all positions for user {user_id}: {len(portfolio)} positions")
+            
+            exited_count = 0
+            errors = []
+
+            for symbol, position in list(portfolio.items()):
+                try:
+                    # Get current market price
+                    quotes = self.get_market_quotes([symbol])
+                    if not quotes:
+                        errors.append(f"Could not get price for {symbol}")
+                        continue
+
+                    current_price = quotes[0]['last_price']
+                    sell_price = round(current_price * 0.995, 2)  # Slightly below market to ensure execution
+
+                    # Place SELL order
+                    result = self.place_order(
+                        symbol=symbol,
+                        action='SELL',
+                        quantity=position['quantity'],
+                        price=sell_price,
+                        user_id=user_id,
+                        product_type=position.get('product_type', 'CNC')
+                    )
+
+                    if result['success']:
+                        print(f"✅ Exited position: {symbol} {position['quantity']} shares @ {sell_price}")
+                        exited_count += 1
+                    else:
+                        errors.append(f"Failed to exit {symbol}: {result.get('error')}")
+
+                except Exception as e:
+                    errors.append(f"Error exiting {symbol}: {str(e)}")
+
+            return {
+                'success': True,
+                'exited_positions': exited_count,
+                'total_positions': len(portfolio),
+                'errors': errors,
+                'message': f'Exited {exited_count}/{len(portfolio)} positions'
+            }
+
+        except Exception as e:
+            return {'success': False, 'error': f'Error exiting positions: {str(e)}'}
+
 # Initialize live trading
 live_trading = LiveTrading()
+
+# Paper Trading System
+class PaperTrading:
+    def __init__(self):
+        self.paper_balances = {}  # user_id -> balance
+        self.paper_positions = {}  # user_id -> {symbol: position_data}
+        
+    def get_paper_balance(self, user_id: int) -> Dict[str, Any]:
+        """Get paper trading balance"""
+        try:
+            settings = UserSettings.query.filter_by(user_id=user_id).first()
+            if not settings:
+                # Create default settings
+                settings = UserSettings(user_id=user_id, paper_trading_balance=100000.0)
+                db.session.add(settings)
+                db.session.commit()
+            
+            # Get current paper positions from database
+            paper_positions = PaperPosition.query.filter_by(user_id=user_id).all()
+            
+            # Calculate current portfolio value
+            portfolio_value = settings.paper_trading_balance
+            for position in paper_positions:
+                # Get current price for the symbol
+                quotes = live_trading.get_market_quotes([position.symbol])
+                if quotes:
+                    current_price = quotes[0]['last_price']
+                    position_value = position.quantity * current_price
+                    portfolio_value += position_value
+            
+            return {
+                'success': True,
+                'paper_balance': settings.paper_trading_balance,
+                'portfolio_value': portfolio_value,
+                'available_cash': settings.paper_trading_balance,
+                'positions_count': len(paper_positions)
+            }
+        except Exception as e:
+            return {'success': False, 'error': str(e)}
+    
+    def get_paper_positions(self, user_id: int) -> List[Dict[str, Any]]:
+        """Get paper trading positions"""
+        try:
+            positions = PaperPosition.query.filter_by(user_id=user_id).all()
+            result = []
+            
+            for position in positions:
+                # Get current price
+                quotes = live_trading.get_market_quotes([position.symbol])
+                current_price = position.average_price  # Default to average price if no quote
+                if quotes:
+                    current_price = quotes[0]['last_price']
+                
+                unrealized_pnl = (current_price - position.average_price) * position.quantity
+                pnl_percent = ((current_price - position.average_price) / position.average_price) * 100
+                
+                result.append({
+                    'symbol': position.symbol,
+                    'quantity': position.quantity,
+                    'average_price': position.average_price,
+                    'current_price': current_price,
+                    'unrealized_pnl': unrealized_pnl,
+                    'invested_amount': position.invested_amount,
+                    'current_value': position.quantity * current_price,
+                    'pnl_percent': pnl_percent,
+                    'product_type': position.product_type,
+                    'action': 'sell'  # FIX: Add action field to prevent undefined
+                })
+            
+            return result
+        except Exception as e:
+            print(f"Error getting paper positions: {e}")
+            return []
+    
+    def calculate_paper_brokerage(self, trade_value: float, action: str, product_type: str = 'CNC') -> float:
+        """Calculate paper trading brokerage (same as live for realism)"""
+        return live_trading.calculate_zerodha_brokerage(trade_value, action, product_type)
+    
+    def place_paper_order(self, symbol: str, action: str, quantity: int, price: float, user_id: int, product_type: str = 'CNC') -> Dict[str, Any]:
+        """Place paper trade order"""
+        try:
+            settings = UserSettings.query.filter_by(user_id=user_id).first()
+            if not settings:
+                return {'success': False, 'error': 'User settings not found'}
+            
+            trade_value = quantity * price
+            brokerage = self.calculate_paper_brokerage(trade_value, action, product_type)
+            total_cost = trade_value + brokerage if action.upper() == 'BUY' else 0
+            
+            # Check balance for BUY orders
+            if action.upper() == 'BUY' and total_cost > settings.paper_trading_balance:
+                return {
+                    'success': False,
+                    'error': f'❌ PAPER: Insufficient balance. Required: ₹{total_cost:.2f}, Available: ₹{settings.paper_trading_balance:.2f}'
+                }
+            
+            # Check position for SELL orders
+            if action.upper() == 'SELL':
+                position = PaperPosition.query.filter_by(user_id=user_id, symbol=symbol).first()
+                if not position or position.quantity < quantity:
+                    return {
+                        'success': False,
+                        'error': f'❌ PAPER: Insufficient shares to sell. Requested: {quantity}, Available: {position.quantity if position else 0}'
+                    }
+            
+            # Execute the paper trade
+            if action.upper() == 'BUY':
+                # Update balance
+                settings.paper_trading_balance -= total_cost
+                
+                # Update or create position
+                position = PaperPosition.query.filter_by(user_id=user_id, symbol=symbol).first()
+                if position:
+                    # Update existing position
+                    total_quantity = position.quantity + quantity
+                    total_invested = position.invested_amount + trade_value
+                    new_avg_price = total_invested / total_quantity
+                    
+                    position.quantity = total_quantity
+                    position.average_price = new_avg_price
+                    position.invested_amount = total_invested
+                    position.updated_at = datetime.now()
+                else:
+                    # Create new position
+                    position = PaperPosition(
+                        user_id=user_id,
+                        symbol=symbol,
+                        quantity=quantity,
+                        average_price=price,
+                        invested_amount=trade_value,
+                        product_type=product_type
+                    )
+                    db.session.add(position)
+                
+            else:  # SELL
+                # Update balance (add sale proceeds minus brokerage)
+                sale_proceeds = trade_value - brokerage
+                settings.paper_trading_balance += sale_proceeds
+                
+                # Update position
+                position = PaperPosition.query.filter_by(user_id=user_id, symbol=symbol).first()
+                if position:
+                    if position.quantity == quantity:
+                        # Close position
+                        db.session.delete(position)
+                    else:
+                        # Reduce position
+                        position.quantity -= quantity
+                        position.invested_amount = position.quantity * position.average_price
+                        position.updated_at = datetime.now()
+            
+            # Generate paper order ID
+            order_id = f"PAPER_{datetime.now().strftime('%Y%m%d%H%M%S')}_{random.randint(1000, 9999)}"
+            
+            db.session.commit()
+            
+            return {
+                'success': True,
+                'order_id': order_id,
+                'message': f'Paper {product_type} order executed: {order_id}',
+                'brokerage': brokerage,
+                'trade_value': trade_value,
+                'product_type': product_type,
+                'available_balance_after': settings.paper_trading_balance
+            }
+            
+        except Exception as e:
+            db.session.rollback()
+            return {'success': False, 'error': f'Paper trade error: {str(e)}'}
+    
+    def get_paper_pnl(self, user_id: int) -> Dict[str, float]:
+        """Calculate paper trading P&L"""
+        try:
+            positions = self.get_paper_positions(user_id)
+            settings = UserSettings.query.filter_by(user_id=user_id).first()
+            
+            if not settings:
+                return {
+                    'realized_pnl': 0.0,
+                    'unrealized_pnl': 0.0,
+                    'total_pnl': 0.0,
+                    'net_pnl': 0.0,
+                    'portfolio_value': 0.0,
+                    'total_invested': 0.0
+                }
+            
+            # Calculate unrealized P&L from current positions
+            unrealized_pnl = 0.0
+            total_invested = 0.0
+            current_value = settings.paper_trading_balance
+            
+            for position in positions:
+                unrealized_pnl += position['unrealized_pnl']
+                total_invested += position['invested_amount']
+                current_value += position['current_value']
+            
+            # Calculate realized P&L from trade history
+            realized_trades = Trade.query.filter_by(
+                user_id=user_id,
+                trading_mode='paper',
+                action='SELL'
+            ).all()
+            
+            realized_pnl = sum(trade.brokerage for trade in realized_trades)
+            
+            total_pnl = unrealized_pnl - realized_pnl
+            
+            return {
+                'realized_pnl': realized_pnl,
+                'unrealized_pnl': unrealized_pnl,
+                'total_pnl': total_pnl,
+                'net_pnl': total_pnl,
+                'portfolio_value': current_value,
+                'total_invested': total_invested
+            }
+            
+        except Exception as e:
+            print(f"Error calculating paper P&L: {e}")
+            return {
+                'realized_pnl': 0.0,
+                'unrealized_pnl': 0.0,
+                'total_pnl': 0.0,
+                'net_pnl': 0.0,
+                'portfolio_value': 0.0,
+                'total_invested': 0.0
+            }
+
+    def exit_all_positions(self, user_id: int) -> Dict[str, Any]:
+        """Exit all paper positions when bot stops"""
+        try:
+            positions = PaperPosition.query.filter_by(user_id=user_id).all()
+            if not positions:
+                return {'success': True, 'message': 'No paper positions to exit', 'exited_positions': 0}
+
+            print(f"🛑 Exiting all paper positions for user {user_id}: {len(positions)} positions")
+            
+            exited_count = 0
+            errors = []
+            settings = UserSettings.query.filter_by(user_id=user_id).first()
+
+            for position in positions:
+                try:
+                    # Get current market price
+                    quotes = live_trading.get_market_quotes([position.symbol])
+                    if not quotes:
+                        errors.append(f"Could not get price for {position.symbol}")
+                        continue
+
+                    current_price = quotes[0]['last_price']
+                    sell_price = round(current_price * 0.995, 2)  # Slightly below market to ensure execution
+
+                    # Calculate brokerage
+                    trade_value = position.quantity * sell_price
+                    brokerage = self.calculate_paper_brokerage(trade_value, 'SELL', position.product_type)
+                    sale_proceeds = trade_value - brokerage
+
+                    # Update balance
+                    settings.paper_trading_balance += sale_proceeds
+
+                    # Create trade record
+                    trade = Trade(
+                        user_id=user_id,
+                        symbol=position.symbol,
+                        action='SELL',
+                        quantity=position.quantity,
+                        price=sell_price,
+                        trading_mode='paper',
+                        status='COMPLETED',
+                        order_id=f"EXIT_{datetime.now().strftime('%Y%m%d%H%M%S')}_{random.randint(1000, 9999)}",
+                        brokerage=brokerage,
+                        product_type=position.product_type
+                    )
+                    db.session.add(trade)
+
+                    # Delete the position
+                    db.session.delete(position)
+                    exited_count += 1
+
+                    print(f"✅ Exited paper position: {position.symbol} {position.quantity} shares @ {sell_price}")
+
+                except Exception as e:
+                    errors.append(f"Error exiting {position.symbol}: {str(e)}")
+
+            db.session.commit()
+
+            return {
+                'success': True,
+                'exited_positions': exited_count,
+                'total_positions': len(positions),
+                'errors': errors,
+                'message': f'Exited {exited_count}/{len(positions)} paper positions'
+            }
+
+        except Exception as e:
+            db.session.rollback()
+            return {'success': False, 'error': f'Error exiting paper positions: {str(e)}'}
+
+    def reset_paper_portfolio(self, user_id: int) -> Dict[str, Any]:
+        """Reset paper trading portfolio to initial state"""
+        try:
+            # Exit all positions first
+            exit_result = self.exit_all_positions(user_id)
+            
+            # Reset paper balance to default
+            settings = UserSettings.query.filter_by(user_id=user_id).first()
+            if settings:
+                settings.paper_trading_balance = 100000.0
+                db.session.commit()
+
+            return {
+                'success': True,
+                'message': 'Paper portfolio reset successfully',
+                'exited_positions': exit_result.get('exited_positions', 0),
+                'new_balance': 100000.0
+            }
+
+        except Exception as e:
+            db.session.rollback()
+            return {'success': False, 'error': f'Error resetting paper portfolio: {str(e)}'}
+
+# Initialize paper trading
+paper_trading = PaperTrading()
 
 # Enhanced Strategy Engine with Capital Management
 class EnhancedStrategyEngine:
@@ -817,7 +1225,8 @@ class EnhancedStrategyEngine:
                     {'name': 'long_window', 'type': 'number', 'default': 20, 'min': 5, 'max': 100, 'description': 'Long moving average window'},
                     {'name': 'quantity', 'type': 'number', 'default': 1, 'min': 1, 'max': 10, 'description': 'Quantity to trade per signal'},
                     {'name': 'max_positions', 'type': 'number', 'default': 3, 'min': 1, 'max': 10, 'description': 'Maximum number of simultaneous positions'},
-                    {'name': 'order_type', 'type': 'select', 'default': 'CNC', 'options': ['MIS', 'CNC'], 'description': 'Order type (MIS for intraday, CNC for delivery)'}
+                    {'name': 'order_type', 'type': 'select', 'default': 'CNC', 'options': ['MIS', 'CNC'], 'description': 'Order type (MIS for intraday, CNC for delivery)'},
+                    {'name': 'risk_level', 'type': 'select', 'default': '50', 'options': ['10', '20', '30', '40', '50', '60', '70', '80', '90', '100'], 'description': 'Trading aggression level (10-100%)'}
                 ]
             },
             {
@@ -829,7 +1238,8 @@ class EnhancedStrategyEngine:
                     {'name': 'deviation_threshold', 'type': 'number', 'default': 2.0, 'min': 1.0, 'max': 5.0, 'description': 'Standard deviation threshold'},
                     {'name': 'quantity', 'type': 'number', 'default': 1, 'min': 1, 'max': 5, 'description': 'Quantity to trade per signal'},
                     {'name': 'max_positions', 'type': 'number', 'default': 3, 'min': 1, 'max': 10, 'description': 'Maximum number of simultaneous positions'},
-                    {'name': 'order_type', 'type': 'select', 'default': 'CNC', 'options': ['MIS', 'CNC'], 'description': 'Order type (MIS for intraday, CNC for delivery)'}
+                    {'name': 'order_type', 'type': 'select', 'default': 'CNC', 'options': ['MIS', 'CNC'], 'description': 'Order type (MIS for intraday, CNC for delivery)'},
+                    {'name': 'risk_level', 'type': 'select', 'default': '50', 'options': ['10', '20', '30', '40', '50', '60', '70', '80', '90', '100'], 'description': 'Trading aggression level (10-100%)'}
                 ]
             }
         ]
@@ -849,25 +1259,54 @@ class EnhancedStrategy:
         self.parameters = parameters or {}
         self.name = "enhanced_strategy"
         self.max_positions = self.parameters.get('max_positions', 3)
-        self.order_type = self.parameters.get('order_type', 'CNC')  # Default to CNC
+        self.order_type = self.parameters.get('order_type', 'CNC')
+        self.risk_level = int(self.parameters.get('risk_level', 50))  # Percentage from 10 to 100
+        
+        # Validate risk level
+        if self.risk_level < 10:
+            self.risk_level = 10
+        elif self.risk_level > 100:
+            self.risk_level = 100
+
+    def get_risk_config(self):
+        """Get risk configuration based on percentage (10-100)"""
+        risk_percentage = self.risk_level / 100.0
+        
+        # Scale parameters linearly based on risk percentage
+        return {
+            'trade_probability': 0.05 + (0.20 * risk_percentage),      # 5% to 25% chance per symbol
+            'buy_probability': 0.3 + (0.5 * risk_percentage),          # 30% to 80% chance for BUY
+            'capital_per_trade': 0.05 + (0.25 * risk_percentage),      # 5% to 30% of available cash per trade
+            'max_positions_multiplier': 0.5 + (1.5 * risk_percentage), # 0.5x to 2x max positions
+            'stop_loss_percent': 1.0 + (4.0 * risk_percentage),        # 1% to 5% stop loss
+            'take_profit_percent': 2.0 + (8.0 * risk_percentage),      # 2% to 10% take profit
+            'symbol_count': max(5, int(5 + (15 * risk_percentage)))    # 5 to 20 symbols
+        }
 
     def generate_signals(self, market_data, current_positions=None, available_cash: float = 0.0):
-        """Generate trading signals with position limits AND capital validation"""
+        """Generate trading signals with percentage-based risk levels"""
         signals = []
-        symbols = list(market_data.keys())[:10]  # Use top 10 affordable symbols
+        risk_config = self.get_risk_config()
+        
+        # Adjust max positions based on risk level
+        adjusted_max_positions = int(self.max_positions * risk_config['max_positions_multiplier'])
+        
+        # Use dynamic symbol count based on risk
+        symbol_count = risk_config['symbol_count']
+        symbols = list(market_data.keys())[:symbol_count]
 
         current_position_count = len(current_positions) if current_positions else 0
 
         for symbol in symbols:
-            if current_position_count >= self.max_positions:
+            if current_position_count >= adjusted_max_positions:
                 break
 
             # Skip trade-to-trade stocks for MIS orders
             if self.order_type == 'MIS' and live_trading._is_trade_to_trade_stock(symbol):
                 continue
 
-            # More realistic signal generation based on price action
-            if random.random() < 0.15:  # Reasonable probability for trading
+            # Risk-based trade probability
+            if random.random() < risk_config['trade_probability']:
                 current_data = market_data.get(symbol, {})
                 if not current_data:
                     continue
@@ -876,18 +1315,18 @@ class EnhancedStrategy:
                 if last_price <= 0:
                     continue
 
-                # CRITICAL FIX: Check if we can afford the trade BEFORE generating signal
-                quantity = self.parameters.get('quantity', 1)
+                # Calculate quantity based on risk level and available capital
+                max_trade_value = available_cash * risk_config['capital_per_trade']
+                quantity = max(1, int(max_trade_value / last_price))
+                
                 trade_value = quantity * last_price
                 brokerage = live_trading.calculate_zerodha_brokerage(trade_value, 'BUY', self.order_type)
                 total_cost = trade_value + brokerage
 
-                # Only generate BUY signals if we can afford them
-                if total_cost <= available_cash * 0.2:  # Use max 20% of available cash per trade
-                    # Simple mean reversion strategy
-                    price_trend = random.choice(['up', 'down'])
-                    
-                    if price_trend == 'up' and random.random() < 0.6:  # 60% chance for BUY
+                # Only generate signals if we can afford them
+                if total_cost <= available_cash * risk_config['capital_per_trade']:
+                    # Risk-based buy probability
+                    if random.random() < risk_config['buy_probability']:
                         action = 'BUY'
                         price = last_price * 1.002  # Slightly above current price
                     else:
@@ -905,10 +1344,12 @@ class EnhancedStrategy:
                         'quantity': quantity,
                         'price': round(price, 2),
                         'order_type': self.order_type,
+                        'risk_level': self.risk_level,
                         'timestamp': datetime.now()
                     })
                     current_position_count += 1
 
+        print(f"🎯 {self.risk_level}% RISK: Generated {len(signals)} signals (Max positions: {adjusted_max_positions})")
         return signals
 
 # Initialize strategy engine
@@ -1194,6 +1635,10 @@ def user_settings():
                 settings.max_capital_usage = float(data['max_capital_usage'])
             if 'default_order_type' in data:
                 settings.default_order_type = data['default_order_type']
+            if 'paper_trading_balance' in data:
+                settings.paper_trading_balance = float(data['paper_trading_balance'])
+            if 'default_risk_level' in data:
+                settings.default_risk_level = int(data['default_risk_level'])
 
             db.session.commit()
 
@@ -1201,7 +1646,7 @@ def user_settings():
 
             socketio.emit('user_notification', {
                 'type': 'success',
-                'message': f'Settings saved! Default profit: ₹{settings.default_target_profit}, Max duration: {settings.default_max_duration}h, Capital usage: {settings.max_capital_usage*100}%, Order type: {settings.default_order_type}',
+                'message': f'Settings saved! Default profit: ₹{settings.default_target_profit}, Max duration: {settings.default_max_duration}h, Capital usage: {settings.max_capital_usage*100}%, Order type: {settings.default_order_type}, Risk level: {settings.default_risk_level}%',
                 'timestamp': datetime.now().isoformat()
             })
 
@@ -1229,6 +1674,8 @@ def user_settings():
                 'default_max_duration': settings.default_max_duration,
                 'max_capital_usage': settings.max_capital_usage,
                 'default_order_type': settings.default_order_type,
+                'paper_trading_balance': settings.paper_trading_balance,
+                'default_risk_level': settings.default_risk_level,
                 'kite_status': kite_status
             })
 
@@ -1255,43 +1702,16 @@ def kite_connection_status():
 @app.route('/api/wallet_balance')
 @login_required
 def wallet_balance():
-    """Get wallet balance for live trading only"""
+    """Get wallet balance for both live and paper trading"""
     try:
-        settings = UserSettings.query.filter_by(user_id=current_user.id).first()
+        trading_mode = request.args.get('mode', 'paper')  # Default to paper trading
+        
+        if trading_mode == 'live':
+            settings = UserSettings.query.filter_by(user_id=current_user.id).first()
 
-        if not settings or not settings.kite_api_key or not settings.kite_access_token:
-            return jsonify({
-                'error': '❌ Zerodha credentials not configured. Please go to Settings and enter your API credentials.',
-                'balance': 0,
-                'portfolio_value': 0,
-                'realized_pnl': 0,
-                'unrealized_pnl': 0,
-                'total_pnl': 0,
-                'net_pnl': 0,
-                'total_brokerage': 0,
-                'currency': 'INR',
-                'mode': 'live'
-            })
-
-        if live_trading.initialize(settings.kite_api_key, settings.kite_access_token):
-            balance_data = live_trading.get_live_balance()
-            if balance_data['success']:
-                pnl_data = live_trading.get_live_pnl(current_user.id)
+            if not settings or not settings.kite_api_key or not settings.kite_access_token:
                 return jsonify({
-                    'balance': balance_data['available_cash'],
-                    'portfolio_value': pnl_data['portfolio_value'],
-                    'realized_pnl': pnl_data['realized_pnl'],
-                    'unrealized_pnl': pnl_data['unrealized_pnl'],
-                    'total_pnl': pnl_data['total_pnl'],
-                    'net_pnl': pnl_data['net_pnl'],
-                    'total_brokerage': 0,
-                    'currency': 'INR',
-                    'mode': 'live',
-                    'note': f'Actual Zerodha Wallet Balance: ₹{balance_data["available_cash"]:.2f}',
-                })
-            else:
-                return jsonify({
-                    'error': f'❌ Failed to fetch Zerodha balance: {balance_data.get("error", "Unknown error")}',
+                    'error': '❌ Zerodha credentials not configured. Please go to Settings and enter your API credentials.',
                     'balance': 0,
                     'portfolio_value': 0,
                     'realized_pnl': 0,
@@ -1302,19 +1722,79 @@ def wallet_balance():
                     'currency': 'INR',
                     'mode': 'live'
                 })
-        else:
-            return jsonify({
-                'error': '❌ Failed to connect to Zerodha. Please check your API credentials.',
-                'balance': 0,
-                'portfolio_value': 0,
-                'realized_pnl': 0,
-                'unrealized_pnl': 0,
-                'total_pnl': 0,
-                'net_pnl': 0,
-                'total_brokerage': 0,
-                'currency': 'INR',
-                'mode': 'live'
-            })
+
+            if live_trading.initialize(settings.kite_api_key, settings.kite_access_token):
+                balance_data = live_trading.get_live_balance()
+                if balance_data['success']:
+                    pnl_data = live_trading.get_live_pnl(current_user.id)
+                    return jsonify({
+                        'balance': balance_data['available_cash'],
+                        'portfolio_value': pnl_data['portfolio_value'],
+                        'realized_pnl': pnl_data['realized_pnl'],
+                        'unrealized_pnl': pnl_data['unrealized_pnl'],
+                        'total_pnl': pnl_data['total_pnl'],
+                        'net_pnl': pnl_data['net_pnl'],
+                        'total_brokerage': 0,
+                        'currency': 'INR',
+                        'mode': 'live',
+                        'note': f'Actual Zerodha Wallet Balance: ₹{balance_data["available_cash"]:.2f}',
+                    })
+                else:
+                    return jsonify({
+                        'error': f'❌ Failed to fetch Zerodha balance: {balance_data.get("error", "Unknown error")}',
+                        'balance': 0,
+                        'portfolio_value': 0,
+                        'realized_pnl': 0,
+                        'unrealized_pnl': 0,
+                        'total_pnl': 0,
+                        'net_pnl': 0,
+                        'total_brokerage': 0,
+                        'currency': 'INR',
+                        'mode': 'live'
+                    })
+            else:
+                return jsonify({
+                    'error': '❌ Failed to connect to Zerodha. Please check your API credentials.',
+                    'balance': 0,
+                    'portfolio_value': 0,
+                    'realized_pnl': 0,
+                    'unrealized_pnl': 0,
+                    'total_pnl': 0,
+                    'net_pnl': 0,
+                    'total_brokerage': 0,
+                    'currency': 'INR',
+                    'mode': 'live'
+                })
+        
+        else:  # Paper trading
+            balance_data = paper_trading.get_paper_balance(current_user.id)
+            if balance_data['success']:
+                pnl_data = paper_trading.get_paper_pnl(current_user.id)
+                return jsonify({
+                    'balance': balance_data['paper_balance'],
+                    'portfolio_value': pnl_data['portfolio_value'],
+                    'realized_pnl': pnl_data['realized_pnl'],
+                    'unrealized_pnl': pnl_data['unrealized_pnl'],
+                    'total_pnl': pnl_data['total_pnl'],
+                    'net_pnl': pnl_data['net_pnl'],
+                    'total_brokerage': 0,
+                    'currency': 'INR',
+                    'mode': 'paper',
+                    'note': f'Paper Trading Balance: ₹{balance_data["paper_balance"]:.2f}',
+                })
+            else:
+                return jsonify({
+                    'error': f'❌ Failed to get paper balance: {balance_data.get("error", "Unknown error")}',
+                    'balance': 0,
+                    'portfolio_value': 0,
+                    'realized_pnl': 0,
+                    'unrealized_pnl': 0,
+                    'total_pnl': 0,
+                    'net_pnl': 0,
+                    'total_brokerage': 0,
+                    'currency': 'INR',
+                    'mode': 'paper'
+                })
 
     except Exception as e:
         print(f"❌ Wallet balance error: {e}")
@@ -1328,8 +1808,39 @@ def wallet_balance():
             'net_pnl': 0,
             'total_brokerage': 0,
             'currency': 'INR',
-            'mode': 'live'
+            'mode': 'paper'
         }), 200
+
+@app.route('/api/reset_paper_portfolio', methods=['POST'])
+@login_required
+def reset_paper_portfolio():
+    """Reset paper trading portfolio to initial state"""
+    try:
+        result = paper_trading.reset_paper_portfolio(current_user.id)
+        
+        if result['success']:
+            socketio.emit('user_notification', {
+                'type': 'success',
+                'message': f"✅ Paper portfolio reset! Exited {result['exited_positions']} positions. New balance: ₹{result['new_balance']:.2f}",
+                'timestamp': datetime.now().isoformat()
+            })
+        else:
+            socketio.emit('user_notification', {
+                'type': 'error',
+                'message': f"❌ Failed to reset paper portfolio: {result.get('error')}",
+                'timestamp': datetime.now().isoformat()
+            })
+            
+        return jsonify(result)
+        
+    except Exception as e:
+        error_msg = f"Error resetting paper portfolio: {str(e)}"
+        socketio.emit('user_notification', {
+            'type': 'error',
+            'message': error_msg,
+            'timestamp': datetime.now().isoformat()
+        })
+        return jsonify({'success': False, 'error': error_msg}), 500
 
 @app.route('/api/debug_zerodha_balance')
 @login_required
@@ -1371,8 +1882,12 @@ def get_active_bots():
 
         bots_data = []
         for session_row in active_sessions:
-            pnl_data = live_trading.get_live_pnl(current_user.id)
-            current_net_pnl = pnl_data['net_pnl']
+            if session_row.trading_mode == 'live':
+                pnl_data = live_trading.get_live_pnl(current_user.id)
+                current_net_pnl = pnl_data['net_pnl']
+            else:
+                pnl_data = paper_trading.get_paper_pnl(current_user.id)
+                current_net_pnl = pnl_data['net_pnl']
 
             bots_data.append({
                 'id': session_row.id,
@@ -1388,6 +1903,7 @@ def get_active_bots():
                 'max_duration_hours': session_row.max_duration_hours,
                 'total_brokerage': float(session_row.total_brokerage),
                 'order_type': session_row.order_type,
+                'risk_level': session_row.risk_level,
                 'current_net_pnl': current_net_pnl
             })
 
@@ -1486,78 +2002,94 @@ def validate_strategy_parameters(strategy_name: str, parameters: Dict[str, Any])
         print(f"❌ Validation error: {e}")
         return False
 
-def can_start_live_bot(settings, capital_required: float) -> Dict[str, Any]:
-    """Check if live bot can be started with current conditions"""
+def can_start_bot(settings, trading_mode: str, capital_required: float) -> Dict[str, Any]:
+    """Check if bot can be started with current conditions"""
     try:
-        market_open = is_market_open()
-        if not market_open:
-            return {
-                'can_start': False,
-                'reason': 'market_closed',
-                'message': '❌ Market is currently closed. Live trading is only available during market hours (9:15 AM - 3:30 PM IST). Please wait for market to open.'
-            }
+        if trading_mode == 'live':
+            market_open = is_market_open()
+            if not market_open:
+                return {
+                    'can_start': False,
+                    'reason': 'market_closed',
+                    'message': '❌ Market is currently closed. Live trading is only available during market hours (9:15 AM - 3:30 PM IST). Please wait for market to open.'
+                }
 
-        if not settings or not settings.kite_api_key or not settings.kite_access_token:
-            return {
-                'can_start': False,
-                'reason': 'credentials_missing',
-                'message': '❌ Zerodha credentials not configured. Please go to Settings and enter your Kite API credentials.'
-            }
+            if not settings or not settings.kite_api_key or not settings.kite_access_token:
+                return {
+                    'can_start': False,
+                    'reason': 'credentials_missing',
+                    'message': '❌ Zerodha credentials not configured. Please go to Settings and enter your Kite API credentials.'
+                }
 
-        # Test connection with better error handling
-        connection_test = test_kite_connection(settings)
-        if not connection_test['connected']:
-            return {
-                'can_start': False,
-                'reason': 'connection_failed',
-                'message': f'❌ {connection_test["message"]}'
-            }
+            # Test connection with better error handling
+            connection_test = test_kite_connection(settings)
+            if not connection_test['connected']:
+                return {
+                    'can_start': False,
+                    'reason': 'connection_failed',
+                    'message': f'❌ {connection_test["message"]}'
+                }
 
-        if live_trading.initialize(settings.kite_api_key, settings.kite_access_token):
-            balance_data = live_trading.get_live_balance()
+            if live_trading.initialize(settings.kite_api_key, settings.kite_access_token):
+                balance_data = live_trading.get_live_balance()
 
-            if balance_data['success']:
-                available_cash = balance_data['available_cash']
+                if balance_data['success']:
+                    available_cash = balance_data['available_cash']
 
-                if available_cash < capital_required:
+                    if available_cash < capital_required:
+                        return {
+                            'can_start': False,
+                            'reason': 'insufficient_balance',
+                            'message': f'❌ Insufficient balance for live trading. Required: ₹{capital_required:.2f}, Available: ₹{available_cash:.2f}. Please add funds to your Zerodha account or reduce the capital amount.'
+                        }
+
+                    return {
+                        'can_start': True,
+                        'message': '✅ All checks passed. Live bot can be started.',
+                        'available_balance': available_cash
+                    }
+                else:
                     return {
                         'can_start': False,
-                        'reason': 'insufficient_balance',
-                        'message': f'❌ Insufficient balance for live trading. Required: ₹{capital_required:.2f}, Available: ₹{available_cash:.2f}. Please add funds to your Zerodha account or reduce the capital amount.'
+                        'reason': 'balance_check_failed',
+                        'message': f'❌ Failed to check Zerodha balance: {balance_data.get("error", "Unknown error")}'
                     }
-
-                return {
-                    'can_start': True,
-                    'message': '✅ All checks passed. Live bot can be started.',
-                    'available_balance': available_cash
-                }
             else:
                 return {
                     'can_start': False,
-                    'reason': 'balance_check_failed',
-                    'message': f'❌ Failed to check Zerodha balance: {balance_data.get("error", "Unknown error")}'
+                    'reason': 'connection_failed',
+                    'message': '❌ Failed to connect to Zerodha. Please check your API credentials and internet connection.'
                 }
-        else:
+        
+        else:  # Paper trading
+            # For paper trading, we don't need market hours or API credentials
+            if settings.paper_trading_balance < capital_required:
+                return {
+                    'can_start': False,
+                    'reason': 'insufficient_balance',
+                    'message': f'❌ Insufficient paper trading balance. Required: ₹{capital_required:.2f}, Available: ₹{settings.paper_trading_balance:.2f}. Please increase your paper trading balance in Settings.'
+                }
+            
             return {
-                'can_start': False,
-                'reason': 'connection_failed',
-                'message': '❌ Failed to connect to Zerodha. Please check your API credentials and internet connection.'
+                'can_start': True,
+                'message': '✅ Paper trading bot can be started.',
+                'available_balance': settings.paper_trading_balance
             }
 
     except Exception as e:
         return {
             'can_start': False,
             'reason': 'error',
-            'message': f'❌ Error checking live trading conditions: {str(e)}'
+            'message': f'❌ Error checking trading conditions: {str(e)}'
         }
 
 @app.route('/api/start_bot', methods=['POST'])
 @login_required
 def start_bot():
-    """Start trading bot with enhanced parameters - LIVE TRADING ONLY"""
+    """Start trading bot with enhanced parameters - BOTH LIVE AND PAPER TRADING"""
     try:
         data = request.json
-        print(f"🚀 Starting LIVE bot with data: {data}")
+        print(f"🚀 Starting bot with data: {data}")
 
         strategy_params = data.get('strategy_params', {})
         converted_params = {}
@@ -1574,7 +2106,8 @@ def start_bot():
             except (ValueError, TypeError):
                 converted_params[key] = value
 
-        capital = float(data.get('capital', 1000))  # Default to smaller amount
+        capital = float(data.get('capital', 1000))
+        trading_mode = data.get('trading_mode', 'paper')  # Default to paper trading
 
         user_settings = UserSettings.query.filter_by(user_id=current_user.id).first()
         if not user_settings:
@@ -1582,8 +2115,8 @@ def start_bot():
             db.session.add(user_settings)
             db.session.commit()
 
-        # Always validate for live trading
-        validation_result = can_start_live_bot(user_settings, capital)
+        # Validate based on trading mode
+        validation_result = can_start_bot(user_settings, trading_mode, capital)
 
         if not validation_result['can_start']:
             socketio.emit('user_notification', {
@@ -1602,15 +2135,22 @@ def start_bot():
         target_profit = float(data.get('target_profit', user_settings.default_target_profit))
         max_duration = int(data.get('max_duration_hours', user_settings.default_max_duration))
         order_type = converted_params.get('order_type', user_settings.default_order_type)
+        risk_level = int(converted_params.get('risk_level', user_settings.default_risk_level))
 
         # Ensure order_type is not empty
         if not order_type:
             order_type = 'CNC'
 
+        # Validate risk level
+        if risk_level < 10:
+            risk_level = 10
+        elif risk_level > 100:
+            risk_level = 100
+
         bot_config = {
             'instrument_type': data.get('instrument_type', 'stocks'),
             'strategy': data.get('strategy', 'mean_reversion'),
-            'trading_mode': 'live',
+            'trading_mode': trading_mode,
             'capital': capital,
             'symbols': [],  # Will be dynamically selected based on wallet
             'strategy_params': converted_params,
@@ -1618,7 +2158,8 @@ def start_bot():
             'target_profit': target_profit,
             'max_duration_hours': max_duration,
             'max_capital_usage': user_settings.max_capital_usage,
-            'order_type': order_type
+            'order_type': order_type,
+            'risk_level': risk_level
         }
 
         if not validate_strategy_parameters(bot_config['strategy'], bot_config['strategy_params']):
@@ -1644,7 +2185,8 @@ def start_bot():
             max_duration_hours=bot_config['max_duration_hours'],
             stop_requested=False,
             force_stop=False,
-            order_type=bot_config['order_type']
+            order_type=bot_config['order_type'],
+            risk_level=bot_config['risk_level']
         )
         db.session.add(session_row)
         db.session.commit()
@@ -1674,13 +2216,13 @@ def start_bot():
 
         log_entry = Log(
             user_id=current_user.id,
-            message=f"LIVE Bot started - Target Profit: ₹{bot_config['target_profit']}, Max Duration: {bot_config['max_duration_hours']}h, Capital: ₹{capital}, Order Type: {order_type}",
+            message=f"{trading_mode.upper()} Bot started - Target Profit: ₹{bot_config['target_profit']}, Max Duration: {bot_config['max_duration_hours']}h, Capital: ₹{capital}, Order Type: {order_type}, Risk Level: {risk_level}%",
             level="INFO"
         )
         db.session.add(log_entry)
         db.session.commit()
 
-        success_msg = f"✅ LIVE Bot started! Target: ₹{bot_config['target_profit']}, Duration: {bot_config['max_duration_hours']}h, Capital: ₹{capital}, Order Type: {order_type}"
+        success_msg = f"✅ {trading_mode.upper()} Bot started! Target: ₹{bot_config['target_profit']}, Duration: {bot_config['max_duration_hours']}h, Capital: ₹{capital}, Order Type: {order_type}, Risk: {risk_level}%"
         socketio.emit('user_notification', {
             'type': 'success',
             'message': success_msg,
@@ -1691,14 +2233,16 @@ def start_bot():
             'session_id': session_row.id,
             'status': 'running',
             'message': success_msg,
-            'trading_mode': 'live'
+            'trading_mode': trading_mode,
+            'risk_level': risk_level
         })
 
         return jsonify({
             'success': True,
             'session_id': session_row.id,
             'message': success_msg,
-            'trading_mode': 'live'
+            'trading_mode': trading_mode,
+            'risk_level': risk_level
         })
 
     except Exception as e:
@@ -1724,11 +2268,11 @@ def start_bot():
 @app.route('/api/stop_bot/<int:session_id>')
 @login_required
 def stop_bot(session_id):
-    """Stop trading bot IMMEDIATELY using thread-safe approach"""
+    """Stop trading bot IMMEDIATELY and exit all positions"""
     try:
         session_row = BotSession.query.get(session_id)
         if session_row and session_row.user_id == current_user.id:
-            print(f"🛑 IMMEDIATE STOP COMMAND for Bot {session_id}")
+            print(f"🛑 IMMEDIATE STOP COMMAND for Bot {session_id} - EXITING ALL POSITIONS")
 
             # Set database flags first
             session_row.stop_requested = True
@@ -1743,14 +2287,25 @@ def stop_bot(session_id):
                 trading_session = trading_sessions[session_key]
                 trading_session.should_stop = True  # Thread-safe immediate stop
 
+            # EXIT ALL POSITIONS based on trading mode
+            exit_result = None
+            if session_row.trading_mode == 'live':
+                exit_result = live_trading.exit_all_positions(current_user.id)
+            else:
+                exit_result = paper_trading.exit_all_positions(current_user.id)
+
             # Update final status
             session_row.status = 'stopped'
             session_row.stopped_at = datetime.now()
             session_row.stop_requested = False
             session_row.force_stop = False
 
-            # Update final P&L
-            pnl_data = live_trading.get_live_pnl(current_user.id)
+            # Update final P&L based on trading mode
+            if session_row.trading_mode == 'live':
+                pnl_data = live_trading.get_live_pnl(current_user.id)
+            else:
+                pnl_data = paper_trading.get_paper_pnl(current_user.id)
+            
             session_row.pnl = pnl_data['net_pnl']
 
             db.session.commit()
@@ -1761,16 +2316,22 @@ def stop_bot(session_id):
                 del trading_sessions[session_key]
 
             # Log the stop action
+            exit_message = ""
+            if exit_result and exit_result.get('success'):
+                exit_message = f" | Exited {exit_result.get('exited_positions', 0)} positions"
+                if exit_result.get('errors'):
+                    exit_message += f" | Errors: {len(exit_result['errors'])}"
+
             log_entry = Log(
                 user_id=current_user.id,
-                message=f"Bot STOPPED IMMEDIATELY - Session {session_id} | Final P&L: ₹{session_row.pnl:.2f}",
+                message=f"Bot STOPPED IMMEDIATELY - Session {session_id} | Final P&L: ₹{session_row.pnl:.2f}{exit_message}",
                 level="INFO"
             )
             db.session.add(log_entry)
             db.session.commit()
 
             # Notify user
-            success_msg = f"🛑 Bot {session_id} STOPPED IMMEDIATELY! Final P&L: ₹{session_row.pnl:.2f}"
+            success_msg = f"🛑 Bot {session_id} STOPPED! Final P&L: ₹{session_row.pnl:.2f}{exit_message}"
             socketio.emit('user_notification', {
                 'type': 'success',
                 'message': success_msg,
@@ -1780,16 +2341,18 @@ def stop_bot(session_id):
             socketio.emit('bot_status_update', {
                 'session_id': session_id,
                 'status': 'stopped',
-                'message': 'Bot stopped immediately - all trading halted',
-                'final_pnl': session_row.pnl
+                'message': 'Bot stopped immediately - all positions exited',
+                'final_pnl': session_row.pnl,
+                'exited_positions': exit_result.get('exited_positions', 0) if exit_result else 0
             })
 
-            print(f"✅ Bot {session_id} completely stopped")
+            print(f"✅ Bot {session_id} completely stopped with position exit")
 
             return jsonify({
                 'success': True,
-                'message': 'Bot stopped successfully',
-                'final_pnl': session_row.pnl
+                'message': 'Bot stopped successfully with position exit',
+                'final_pnl': session_row.pnl,
+                'exited_positions': exit_result.get('exited_positions', 0) if exit_result else 0
             })
         else:
             error_msg = 'Session not found or access denied'
@@ -1819,8 +2382,12 @@ def get_bot_performance(session_id):
         if not session_row or session_row.user_id != current_user.id:
             return jsonify({'error': 'Session not found'}), 404
 
-        pnl_data = live_trading.get_live_pnl(current_user.id)
-        positions = live_trading.get_live_positions(current_user.id)
+        if session_row.trading_mode == 'live':
+            pnl_data = live_trading.get_live_pnl(current_user.id)
+            positions = live_trading.get_live_positions(current_user.id)
+        else:
+            pnl_data = paper_trading.get_paper_pnl(current_user.id)
+            positions = paper_trading.get_paper_positions(current_user.id)
 
         trades = Trade.query.filter_by(bot_session_id=session_id).all()
         total_brokerage = sum(trade.brokerage for trade in trades)
@@ -1850,6 +2417,7 @@ def get_bot_performance(session_id):
             'target_profit': float(session_row.target_profit),
             'max_duration_hours': session_row.max_duration_hours,
             'order_type': session_row.order_type,
+            'risk_level': session_row.risk_level,
             'profit_target_achieved': pnl_data['net_pnl'] >= session_row.target_profit if session_row.target_profit > 0 else False,
             'time_remaining_hours': max(0, session_row.max_duration_hours - running_time) if session_row.status == 'running' else 0
         }
@@ -1862,9 +2430,15 @@ def get_bot_performance(session_id):
 @app.route('/api/positions')
 @login_required
 def get_positions():
-    """Get current live positions"""
+    """Get current positions for both live and paper trading"""
     try:
-        positions = live_trading.get_live_positions(current_user.id)
+        trading_mode = request.args.get('mode', 'paper')
+        
+        if trading_mode == 'live':
+            positions = live_trading.get_live_positions(current_user.id)
+        else:
+            positions = paper_trading.get_paper_positions(current_user.id)
+            
         return jsonify(positions)
 
     except Exception as e:
@@ -1873,13 +2447,14 @@ def get_positions():
 @app.route('/api/orders')
 @login_required
 def get_orders():
-    """Get order history"""
+    """Get order history for both live and paper trading"""
     try:
         limit = request.args.get('limit', 50, type=int)
+        trading_mode = request.args.get('mode', 'paper')
 
         orders = Trade.query.filter_by(
             user_id=current_user.id,
-            trading_mode='live'
+            trading_mode=trading_mode
         ).order_by(Trade.timestamp.desc()).limit(limit).all()
 
         orders_data = []
@@ -1929,49 +2504,16 @@ def get_logs():
 @app.route('/api/portfolio_summary')
 @login_required
 def get_portfolio_summary():
-    """Get portfolio summary with brokerage details"""
+    """Get portfolio summary with brokerage details for both live and paper trading"""
     try:
-        settings = UserSettings.query.filter_by(user_id=current_user.id).first()
+        trading_mode = request.args.get('mode', 'paper')
+        
+        if trading_mode == 'live':
+            settings = UserSettings.query.filter_by(user_id=current_user.id).first()
 
-        if not settings or not settings.kite_api_key or not settings.kite_access_token:
-            return jsonify({
-                'error': '❌ Zerodha credentials not configured. Please go to Settings and enter your API credentials.',
-                'available_cash': 0,
-                'portfolio_value': 0,
-                'realized_pnl': 0,
-                'unrealized_pnl': 0,
-                'total_pnl': 0,
-                'net_pnl': 0,
-                'mode': 'live'
-            })
-
-        if live_trading.initialize(settings.kite_api_key, settings.kite_access_token):
-            balance_data = live_trading.get_live_balance()
-            pnl_data = live_trading.get_live_pnl(current_user.id)
-            positions = live_trading.get_live_positions(current_user.id)
-
-            if balance_data['success']:
+            if not settings or not settings.kite_api_key or not settings.kite_access_token:
                 return jsonify({
-                    'initial_capital': balance_data['available_cash'],
-                    'available_cash': balance_data['available_cash'],
-                    'portfolio_value': pnl_data['portfolio_value'],
-                    'realized_pnl': pnl_data['realized_pnl'],
-                    'unrealized_pnl': pnl_data['unrealized_pnl'],
-                    'total_pnl': pnl_data['total_pnl'],
-                    'net_pnl': pnl_data['net_pnl'],
-                    'return_percent': (pnl_data['net_pnl'] / balance_data['available_cash']) * 100 if balance_data['available_cash'] > 0 else 0,
-                    'total_charges': 0,
-                    'total_brokerage': 0,
-                    'positions_count': len(positions),
-                    'trades_count': len(positions),
-                    'used_capital': pnl_data.get('total_invested', 0),
-                    'capital_usage_percent': (pnl_data.get('total_invested', 0) / balance_data['available_cash']) * 100 if balance_data['available_cash'] > 0 else 0,
-                    'mode': 'live',
-                    'note': 'Real Zerodha data'
-                })
-            else:
-                return jsonify({
-                    'error': f'❌ Failed to fetch Zerodha data: {balance_data.get("error", "Unknown error")}',
+                    'error': '❌ Zerodha credentials not configured. Please go to Settings and enter your API credentials.',
                     'available_cash': 0,
                     'portfolio_value': 0,
                     'realized_pnl': 0,
@@ -1980,17 +2522,89 @@ def get_portfolio_summary():
                     'net_pnl': 0,
                     'mode': 'live'
                 })
-        else:
-            return jsonify({
-                'error': '❌ Failed to connect to Zerodha. Please check your API credentials.',
-                'available_cash': 0,
-                'portfolio_value': 0,
-                'realized_pnl': 0,
-                'unrealized_pnl': 0,
-                'total_pnl': 0,
-                'net_pnl': 0,
-                'mode': 'live'
-            })
+
+            if live_trading.initialize(settings.kite_api_key, settings.kite_access_token):
+                balance_data = live_trading.get_live_balance()
+                pnl_data = live_trading.get_live_pnl(current_user.id)
+                positions = live_trading.get_live_positions(current_user.id)
+
+                if balance_data['success']:
+                    return jsonify({
+                        'initial_capital': balance_data['available_cash'],
+                        'available_cash': balance_data['available_cash'],
+                        'portfolio_value': pnl_data['portfolio_value'],
+                        'realized_pnl': pnl_data['realized_pnl'],
+                        'unrealized_pnl': pnl_data['unrealized_pnl'],
+                        'total_pnl': pnl_data['total_pnl'],
+                        'net_pnl': pnl_data['net_pnl'],
+                        'return_percent': (pnl_data['net_pnl'] / balance_data['available_cash']) * 100 if balance_data['available_cash'] > 0 else 0,
+                        'total_charges': 0,
+                        'total_brokerage': 0,
+                        'positions_count': len(positions),
+                        'trades_count': len(positions),
+                        'used_capital': pnl_data.get('total_invested', 0),
+                        'capital_usage_percent': (pnl_data.get('total_invested', 0) / balance_data['available_cash']) * 100 if balance_data['available_cash'] > 0 else 0,
+                        'mode': 'live',
+                        'note': 'Real Zerodha data'
+                    })
+                else:
+                    return jsonify({
+                        'error': f'❌ Failed to fetch Zerodha data: {balance_data.get("error", "Unknown error")}',
+                        'available_cash': 0,
+                        'portfolio_value': 0,
+                        'realized_pnl': 0,
+                        'unrealized_pnl': 0,
+                        'total_pnl': 0,
+                        'net_pnl': 0,
+                        'mode': 'live'
+                    })
+            else:
+                return jsonify({
+                    'error': '❌ Failed to connect to Zerodha. Please check your API credentials.',
+                    'available_cash': 0,
+                    'portfolio_value': 0,
+                    'realized_pnl': 0,
+                    'unrealized_pnl': 0,
+                    'total_pnl': 0,
+                    'net_pnl': 0,
+                    'mode': 'live'
+                })
+        
+        else:  # Paper trading
+            balance_data = paper_trading.get_paper_balance(current_user.id)
+            pnl_data = paper_trading.get_paper_pnl(current_user.id)
+            positions = paper_trading.get_paper_positions(current_user.id)
+            
+            if balance_data['success']:
+                return jsonify({
+                    'initial_capital': balance_data['paper_balance'],
+                    'available_cash': balance_data['paper_balance'],
+                    'portfolio_value': pnl_data['portfolio_value'],
+                    'realized_pnl': pnl_data['realized_pnl'],
+                    'unrealized_pnl': pnl_data['unrealized_pnl'],
+                    'total_pnl': pnl_data['total_pnl'],
+                    'net_pnl': pnl_data['net_pnl'],
+                    'return_percent': (pnl_data['net_pnl'] / balance_data['paper_balance']) * 100 if balance_data['paper_balance'] > 0 else 0,
+                    'total_charges': 0,
+                    'total_brokerage': 0,
+                    'positions_count': len(positions),
+                    'trades_count': len(positions),
+                    'used_capital': pnl_data.get('total_invested', 0),
+                    'capital_usage_percent': (pnl_data.get('total_invested', 0) / balance_data['paper_balance']) * 100 if balance_data['paper_balance'] > 0 else 0,
+                    'mode': 'paper',
+                    'note': 'Paper Trading Simulation'
+                })
+            else:
+                return jsonify({
+                    'error': f'❌ Failed to get paper trading data: {balance_data.get("error", "Unknown error")}',
+                    'available_cash': 0,
+                    'portfolio_value': 0,
+                    'realized_pnl': 0,
+                    'unrealized_pnl': 0,
+                    'total_pnl': 0,
+                    'net_pnl': 0,
+                    'mode': 'paper'
+                })
 
     except Exception as e:
         print(f"❌ Portfolio summary error: {e}")
@@ -2002,50 +2616,79 @@ def get_portfolio_summary():
             'unrealized_pnl': 0,
             'total_pnl': 0,
             'net_pnl': 0,
-            'mode': 'live'
+            'mode': 'paper'
         }), 200
 
-def validate_trade_affordability(user_id: int, symbol: str, action: str, quantity: int, price: float, product_type: str = 'CNC') -> Dict[str, Any]:
+def validate_trade_affordability(user_id: int, symbol: str, action: str, quantity: int, price: float, product_type: str = 'CNC', trading_mode: str = 'paper') -> Dict[str, Any]:
     """
     CRITICAL FIX: Validate if user can afford the trade before executing
     """
     try:
         trade_value = quantity * price
-        brokerage = live_trading.calculate_zerodha_brokerage(trade_value, action, product_type)
-        total_cost = trade_value + brokerage if action.upper() == 'BUY' else 0
+        
+        if trading_mode == 'live':
+            brokerage = live_trading.calculate_zerodha_brokerage(trade_value, action, product_type)
+            total_cost = trade_value + brokerage if action.upper() == 'BUY' else 0
 
-        settings = UserSettings.query.filter_by(user_id=user_id).first()
-        if not settings or not live_trading.initialize(settings.kite_api_key, settings.kite_access_token):
-            return {'can_afford': False, 'error': 'Live trading not configured'}
+            settings = UserSettings.query.filter_by(user_id=user_id).first()
+            if not settings or not live_trading.initialize(settings.kite_api_key, settings.kite_access_token):
+                return {'can_afford': False, 'error': 'Live trading not configured'}
+            
+            balance_data = live_trading.get_live_balance()
+            if not balance_data['success']:
+                return {'can_afford': False, 'error': f'Failed to check balance: {balance_data.get("error")}'}
+            
+            available_cash = balance_data['available_cash']
+            
+            if action.upper() == 'BUY' and total_cost > available_cash:
+                return {
+                    'can_afford': False,
+                    'error': f'❌ LIVE: Insufficient balance. Required: ₹{total_cost:.2f}, Available: ₹{available_cash:.2f}'
+                }
+            return {'can_afford': True, 'available_cash': available_cash}
         
-        balance_data = live_trading.get_live_balance()
-        if not balance_data['success']:
-            return {'can_afford': False, 'error': f'Failed to check balance: {balance_data.get("error")}'}
-        
-        available_cash = balance_data['available_cash']
-        
-        if action.upper() == 'BUY' and total_cost > available_cash:
-            return {
-                'can_afford': False,
-                'error': f'❌ LIVE: Insufficient balance. Required: ₹{total_cost:.2f}, Available: ₹{available_cash:.2f}'
-            }
-        return {'can_afford': True, 'available_cash': available_cash}
+        else:  # Paper trading
+            brokerage = paper_trading.calculate_paper_brokerage(trade_value, action, product_type)
+            total_cost = trade_value + brokerage if action.upper() == 'BUY' else 0
+            
+            settings = UserSettings.query.filter_by(user_id=user_id).first()
+            if not settings:
+                return {'can_afford': False, 'error': 'User settings not found'}
+            
+            if action.upper() == 'BUY' and total_cost > settings.paper_trading_balance:
+                return {
+                    'can_afford': False,
+                    'error': f'❌ PAPER: Insufficient balance. Required: ₹{total_cost:.2f}, Available: ₹{settings.paper_trading_balance:.2f}'
+                }
+            
+            # For SELL orders, check if we have the position
+            if action.upper() == 'SELL':
+                position = PaperPosition.query.filter_by(user_id=user_id, symbol=symbol).first()
+                if not position or position.quantity < quantity:
+                    return {
+                        'can_afford': False,
+                        'error': f'❌ PAPER: Insufficient shares to sell. Requested: {quantity}, Available: {position.quantity if position else 0}'
+                    }
+            
+            return {'can_afford': True, 'available_cash': settings.paper_trading_balance}
             
     except Exception as e:
         return {'can_afford': False, 'error': f'Validation error: {str(e)}'}
 
-def execute_live_trade(session_id: int, config: Dict[str, Any], signal: Dict[str, Any]):
-    """Execute LIVE trade with capital validation and position tracking"""
+def execute_trade(session_id: int, config: Dict[str, Any], signal: Dict[str, Any]):
+    """Execute trade with capital validation and position tracking - BOTH LIVE AND PAPER"""
     try:
         user_id = config['user_id']
+        trading_mode = config['trading_mode']
         product_type = signal.get('order_type', config.get('order_type', 'CNC'))
+        risk_level = signal.get('risk_level', config.get('risk_level', 50))
 
         # Ensure product_type is not empty
         if not product_type:
             product_type = 'CNC'
 
-        # Skip trade-to-trade stocks for MIS orders
-        if product_type == 'MIS' and live_trading._is_trade_to_trade_stock(signal['symbol']):
+        # Skip trade-to-trade stocks for MIS orders (only for live trading)
+        if trading_mode == 'live' and product_type == 'MIS' and live_trading._is_trade_to_trade_stock(signal['symbol']):
             error_msg = f"❌ TRADE-TO-TRADE STOCK: {signal['symbol']} cannot be traded intraday (MIS). This is a trade-to-trade stock."
             print(error_msg)
             
@@ -2064,7 +2707,7 @@ def execute_live_trade(session_id: int, config: Dict[str, Any], signal: Dict[str
             })
             return  # STOP execution - cannot trade this stock intraday
 
-        # Get current price from Zerodha
+        # Get current price from Zerodha (for both live and paper trading)
         quotes = live_trading.get_market_quotes([signal['symbol']])
         if not quotes:
             print(f"❌ Could not get current price for {signal['symbol']}")
@@ -2077,7 +2720,7 @@ def execute_live_trade(session_id: int, config: Dict[str, Any], signal: Dict[str
         else:
             execution_price = round(current_price * 0.998, 2)  # Slightly below current
 
-        print(f"🎯 Attempting {signal['action']} trade for {signal['symbol']} at {execution_price:.2f} ({product_type})")
+        print(f"🎯 Attempting {signal['action']} trade for {signal['symbol']} at {execution_price:.2f} ({product_type}) - Mode: {trading_mode} - Risk: {risk_level}%")
 
         # CRITICAL FIX: Validate affordability BEFORE attempting trade
         validation_result = validate_trade_affordability(
@@ -2086,7 +2729,8 @@ def execute_live_trade(session_id: int, config: Dict[str, Any], signal: Dict[str
             action=signal['action'],
             quantity=signal['quantity'],
             price=execution_price,
-            product_type=product_type
+            product_type=product_type,
+            trading_mode=trading_mode
         )
 
         if not validation_result['can_afford']:
@@ -2109,11 +2753,31 @@ def execute_live_trade(session_id: int, config: Dict[str, Any], signal: Dict[str
             return  # STOP execution - cannot afford this trade
 
         # If we can afford, proceed with trade execution
-        print(f"✅ Affordability check passed. Proceeding with LIVE trade...")
+        print(f"✅ Affordability check passed. Proceeding with {trading_mode} trade...")
 
-        settings = UserSettings.query.filter_by(user_id=user_id).first()
-        if settings and live_trading.initialize(settings.kite_api_key, settings.kite_access_token):
-            result = live_trading.place_order(
+        if trading_mode == 'live':
+            settings = UserSettings.query.filter_by(user_id=user_id).first()
+            if settings and live_trading.initialize(settings.kite_api_key, settings.kite_access_token):
+                result = live_trading.place_order(
+                    symbol=signal['symbol'],
+                    action=signal['action'],
+                    quantity=signal['quantity'],
+                    price=execution_price,
+                    user_id=user_id,
+                    product_type=product_type
+                )
+            else:
+                error_msg = "Cannot execute LIVE trade: Kite not initialized or settings not found"
+                log_entry = Log(
+                    user_id=user_id,
+                    message=error_msg,
+                    level="ERROR"
+                )
+                db.session.add(log_entry)
+                db.session.commit()
+                return
+        else:  # Paper trading
+            result = paper_trading.place_paper_order(
                 symbol=signal['symbol'],
                 action=signal['action'],
                 quantity=signal['quantity'],
@@ -2122,80 +2786,70 @@ def execute_live_trade(session_id: int, config: Dict[str, Any], signal: Dict[str
                 product_type=product_type
             )
 
-            if result['success']:
-                trade = Trade(
-                    user_id=user_id,
-                    bot_session_id=session_id,
-                    symbol=signal['symbol'],
-                    action=signal['action'],
-                    quantity=signal['quantity'],
-                    price=execution_price,
-                    trading_mode='live',
-                    status='COMPLETED',
-                    order_id=result.get('order_id'),
-                    brokerage=result.get('brokerage', 0.0),
-                    product_type=result.get('product_type', product_type)
-                )
-                db.session.add(trade)
+        if result['success']:
+            trade = Trade(
+                user_id=user_id,
+                bot_session_id=session_id,
+                symbol=signal['symbol'],
+                action=signal['action'],
+                quantity=signal['quantity'],
+                price=execution_price,
+                trading_mode=trading_mode,
+                status='COMPLETED',
+                order_id=result.get('order_id'),
+                brokerage=result.get('brokerage', 0.0),
+                product_type=result.get('product_type', product_type)
+            )
+            db.session.add(trade)
 
-                session_row = BotSession.query.get(session_id)
-                if session_row:
-                    session_row.total_brokerage += result.get('brokerage', 0.0)
+            session_row = BotSession.query.get(session_id)
+            if session_row:
+                session_row.total_brokerage += result.get('brokerage', 0.0)
 
-                db.session.commit()
+            db.session.commit()
 
-                log_entry = Log(
-                    user_id=user_id,
-                    message=f"LIVE Trade executed: {signal['action']} {signal['quantity']} {signal['symbol']} @ {execution_price:.2f} | Order: {result.get('order_id')} | Product: {result.get('product_type', product_type)} | Brokerage: ₹{result.get('brokerage', 0.0):.2f}",
-                    level="INFO"
-                )
-                db.session.add(log_entry)
-                db.session.commit()
+            log_entry = Log(
+                user_id=user_id,
+                message=f"{trading_mode.upper()} Trade executed: {signal['action']} {signal['quantity']} {signal['symbol']} @ {execution_price:.2f} | Order: {result.get('order_id')} | Product: {result.get('product_type', product_type)} | Brokerage: ₹{result.get('brokerage', 0.0):.2f} | Risk: {risk_level}%",
+                level="INFO"
+            )
+            db.session.add(log_entry)
+            db.session.commit()
 
-                # Emit position update for live trading
+            # Emit position update
+            if trading_mode == 'live':
                 positions = live_trading.get_live_positions(user_id)
-                socketio.emit('positions_update', {
-                    'user_id': user_id,
-                    'positions': positions,
-                    'mode': 'live',
-                    'timestamp': datetime.now().isoformat()
-                })
-
-                socketio.emit('user_notification', {
-                    'type': 'success',
-                    'message': f"LIVE Trade: {signal['action']} {signal['symbol']} @ ₹{execution_price:.2f} | Order: {result.get('order_id')} | Product: {result.get('product_type', product_type)}",
-                    'timestamp': datetime.now().isoformat()
-                })
-
-                socketio.emit('trade_executed', {
-                    'session_id': session_id,
-                    'symbol': signal['symbol'],
-                    'action': signal['action'],
-                    'quantity': signal['quantity'],
-                    'price': execution_price,
-                    'brokerage': result.get('brokerage', 0.0),
-                    'order_id': result.get('order_id'),
-                    'product_type': result.get('product_type', product_type),
-                    'mode': 'live',
-                    'timestamp': datetime.now().isoformat()
-                })
             else:
-                error_msg = f"LIVE Trade failed: {result.get('error', 'Unknown error')}"
-                log_entry = Log(
-                    user_id=user_id,
-                    message=error_msg,
-                    level="ERROR"
-                )
-                db.session.add(log_entry)
-                db.session.commit()
+                positions = paper_trading.get_paper_positions(user_id)
+                
+            socketio.emit('positions_update', {
+                'user_id': user_id,
+                'positions': positions,
+                'mode': trading_mode,
+                'timestamp': datetime.now().isoformat()
+            })
 
-                socketio.emit('user_notification', {
-                    'type': 'error',
-                    'message': error_msg,
-                    'timestamp': datetime.now().isoformat()
-                })
+            socketio.emit('user_notification', {
+                'type': 'success',
+                'message': f"{trading_mode.upper()} Trade: {signal['action']} {signal['symbol']} @ ₹{execution_price:.2f} | Order: {result.get('order_id')} | Product: {result.get('product_type', product_type)} | Risk: {risk_level}%",
+                'timestamp': datetime.now().isoformat()
+            })
+
+            socketio.emit('trade_executed', {
+                'session_id': session_id,
+                'symbol': signal['symbol'],
+                'action': signal['action'],
+                'quantity': signal['quantity'],
+                'price': execution_price,
+                'brokerage': result.get('brokerage', 0.0),
+                'order_id': result.get('order_id'),
+                'product_type': result.get('product_type', product_type),
+                'risk_level': risk_level,
+                'mode': trading_mode,
+                'timestamp': datetime.now().isoformat()
+            })
         else:
-            error_msg = "Cannot execute LIVE trade: Kite not initialized or settings not found"
+            error_msg = f"{trading_mode.upper()} Trade failed: {result.get('error', 'Unknown error')}"
             log_entry = Log(
                 user_id=user_id,
                 message=error_msg,
@@ -2228,27 +2882,35 @@ def execute_live_trade(session_id: int, config: Dict[str, Any], signal: Dict[str
             'timestamp': datetime.now().isoformat()
         })
 
-def get_available_cash(user_id: int) -> float:
-    """Get available cash for trading from Zerodha"""
+def get_available_cash(user_id: int, trading_mode: str) -> float:
+    """Get available cash for trading"""
     try:
-        settings = UserSettings.query.filter_by(user_id=user_id).first()
-        if settings and live_trading.initialize(settings.kite_api_key, settings.kite_access_token):
-            balance_data = live_trading.get_live_balance()
-            if balance_data['success']:
-                return balance_data['available_cash']
-        return 0.0
+        if trading_mode == 'live':
+            settings = UserSettings.query.filter_by(user_id=user_id).first()
+            if settings and live_trading.initialize(settings.kite_api_key, settings.kite_access_token):
+                balance_data = live_trading.get_live_balance()
+                if balance_data['success']:
+                    return balance_data['available_cash']
+            return 0.0
+        else:  # Paper trading
+            settings = UserSettings.query.filter_by(user_id=user_id).first()
+            if settings:
+                return settings.paper_trading_balance
+            return 0.0
     except Exception as e:
         print(f"Error getting available cash: {e}")
         return 0.0
 
 def run_enhanced_trading_bot(session_id: int, config: Dict[str, Any], trading_session: TradingSession):
-    """Enhanced trading bot with capital validation and position tracking - LIVE ONLY"""
+    """Enhanced trading bot with capital validation and position tracking - BOTH LIVE AND PAPER"""
     with app.app_context():
         try:
             strategy = strategy_engine.get_strategy(config['strategy'], config['strategy_params'])
+            trading_mode = config['trading_mode']
+            risk_level = config.get('risk_level', 50)
             
             # DYNAMIC STOCK SELECTION: Get affordable stocks based on current wallet balance
-            current_balance = get_available_cash(config['user_id'])
+            current_balance = get_available_cash(config['user_id'], trading_mode)
             symbols = get_affordable_stocks(config['user_id'], current_balance, config.get('max_capital_usage', 0.8))
             
             if not symbols:
@@ -2260,18 +2922,18 @@ def run_enhanced_trading_bot(session_id: int, config: Dict[str, Any], trading_se
                     db.session.commit()
                 return
             
-            print(f"🎯 Bot {session_id} selected {len(symbols)} affordable stocks for wallet: ₹{current_balance:.2f}")
+            print(f"🎯 Bot {session_id} selected {len(symbols)} affordable stocks for wallet: ₹{current_balance:.2f} - Mode: {trading_mode} - Risk: {risk_level}%")
             print(f"📊 Stocks: {symbols}")
 
             log_entry = Log(
                 user_id=config['user_id'],
-                message=f"LIVE Bot {session_id} started with profit target: ₹{config['target_profit']}, max duration: {config['max_duration_hours']}h, capital: ₹{config['capital']}, affordable stocks: {len(symbols)}, order type: {config.get('order_type', 'CNC')}",
+                message=f"{trading_mode.upper()} Bot {session_id} started with profit target: ₹{config['target_profit']}, max duration: {config['max_duration_hours']}h, capital: ₹{config['capital']}, affordable stocks: {len(symbols)}, order type: {config.get('order_type', 'CNC')}, risk level: {risk_level}%",
                 level="INFO"
             )
             db.session.add(log_entry)
             db.session.commit()
 
-            print(f"🤖 LIVE Bot {session_id} started! Target: ₹{config['target_profit']}, Duration: {config['max_duration_hours']}h, Capital: ₹{config['capital']}, Order Type: {config.get('order_type', 'CNC')}")
+            print(f"🤖 {trading_mode.upper()} Bot {session_id} started! Target: ₹{config['target_profit']}, Duration: {config['max_duration_hours']}h, Capital: ₹{config['capital']}, Order Type: {config.get('order_type', 'CNC')}, Risk: {risk_level}%")
 
             session_row = BotSession.query.get(session_id)
             iteration = 0
@@ -2291,7 +2953,13 @@ def run_enhanced_trading_bot(session_id: int, config: Dict[str, Any], trading_se
                     if session_row:
                         session_row.status = 'stopped'
                         session_row.stopped_at = datetime.now()
-                        pnl_data = live_trading.get_live_pnl(config['user_id'])
+                        
+                        # Update final P&L based on trading mode
+                        if trading_mode == 'live':
+                            pnl_data = live_trading.get_live_pnl(config['user_id'])
+                        else:
+                            pnl_data = paper_trading.get_paper_pnl(config['user_id'])
+                            
                         session_row.pnl = pnl_data['net_pnl']
                         db.session.commit()
 
@@ -2308,14 +2976,18 @@ def run_enhanced_trading_bot(session_id: int, config: Dict[str, Any], trading_se
                     db.session.commit()
                     break
 
-                should_trade = is_market_open()
+                should_trade = is_market_open() if trading_mode == 'live' else True  # Paper trading can run anytime
 
                 if should_trade:
                     # Get current available cash for capital-aware signal generation
-                    available_cash = get_available_cash(config['user_id'])
+                    available_cash = get_available_cash(config['user_id'], trading_mode)
 
                     # Check profit target
-                    pnl_data = live_trading.get_live_pnl(config['user_id'])
+                    if trading_mode == 'live':
+                        pnl_data = live_trading.get_live_pnl(config['user_id'])
+                    else:
+                        pnl_data = paper_trading.get_paper_pnl(config['user_id'])
+                        
                     if config['target_profit'] > 0 and pnl_data['net_pnl'] >= config['target_profit']:
                         print(f"🎯 Bot {session_id} achieved profit target! P&L: ₹{pnl_data['net_pnl']:.2f}")
                         session_row.status = 'completed'
@@ -2336,7 +3008,10 @@ def run_enhanced_trading_bot(session_id: int, config: Dict[str, Any], trading_se
                         }
 
                     # Get current positions for position limit
-                    current_positions = live_trading.get_live_positions(config['user_id'])
+                    if trading_mode == 'live':
+                        current_positions = live_trading.get_live_positions(config['user_id'])
+                    else:
+                        current_positions = paper_trading.get_paper_positions(config['user_id'])
 
                     # Generate signals with capital validation
                     signals = strategy.generate_signals(
@@ -2346,7 +3021,7 @@ def run_enhanced_trading_bot(session_id: int, config: Dict[str, Any], trading_se
                     )
 
                     if signals:
-                        print(f"📈 Bot {session_id} generated {len(signals)} AFFORDABLE signals")
+                        print(f"📈 Bot {session_id} generated {len(signals)} AFFORDABLE signals (Risk: {risk_level}%)")
                         for signal in signals:
                             # ULTRA-FAST stop check before each trade execution
                             if trading_session.should_stop:
@@ -2359,13 +3034,17 @@ def run_enhanced_trading_bot(session_id: int, config: Dict[str, Any], trading_se
                                 print(f"🛑 Database stop detected. ABORTING TRADES.")
                                 break
 
-                            execute_live_trade(session_id, config, signal)
+                            execute_trade(session_id, config, signal)
                     else:
                         if iteration % 10 == 0:
-                            pnl_data = live_trading.get_live_pnl(config['user_id'])
+                            if trading_mode == 'live':
+                                pnl_data = live_trading.get_live_pnl(config['user_id'])
+                            else:
+                                pnl_data = paper_trading.get_paper_pnl(config['user_id'])
+                                
                             log_entry = Log(
                                 user_id=config['user_id'],
-                                message=f"Bot {session_id} running - P&L: ₹{pnl_data['net_pnl']:.2f}, Positions: {len(current_positions)}",
+                                message=f"Bot {session_id} running - P&L: ₹{pnl_data['net_pnl']:.2f}, Positions: {len(current_positions)}, Risk: {risk_level}%",
                                 level="DEBUG"
                             )
                             db.session.add(log_entry)
@@ -2397,7 +3076,7 @@ def run_enhanced_trading_bot(session_id: int, config: Dict[str, Any], trading_se
                 del trading_sessions[session_key]
 
         except Exception as e:
-            error_msg = f"LIVE Bot {session_id} error: {str(e)}"
+            error_msg = f"{trading_mode.upper()} Bot {session_id} error: {str(e)}"
             print(f"❌ {error_msg}")
             log_entry = Log(
                 user_id=config['user_id'],
@@ -2462,7 +3141,7 @@ def handle_connect():
     """Handle WebSocket connection"""
     print(f"🔌 WebSocket connected: {request.sid}")
     emit('connection_response', {
-        'data': 'Connected to LIVE trading bot',
+        'data': 'Connected to trading bot',
         'status': 'connected',
         'timestamp': datetime.now().isoformat()
     })
@@ -2521,11 +3200,12 @@ if __name__ == '__main__':
                 db.session.commit()
                 print("✅ Created demo user: username='demo', password='demo123'")
 
-            print("🚀 Starting LIVE Indian Stock Trading Bot...")
+            print("🚀 Starting Indian Stock Trading Bot...")
             print("📍 Access: http://localhost:5000")
             print("🔑 Demo: username='demo', password='demo123'")
-            print("🎯 GUARANTEED Features:")
-            print("   - ✅ 100% LIVE TRADING ONLY (No paper trading)")
+            print("🎯 Features:")
+            print("   - ✅ LIVE TRADING with Zerodha API")
+            print("   - ✅ PAPER TRADING with virtual balance")
             print("   - ✅ DYNAMIC STOCK SELECTION using Zerodha API")
             print("   - ✅ REAL ORDER PLACEMENT with Zerodha")
             print("   - ✅ TOP GAINERS based on available wallet balance")
@@ -2533,6 +3213,9 @@ if __name__ == '__main__':
             print("   - ✅ LIVE POSITION TRACKING")
             print("   - ✅ AUTOMATIC MIS/CNC ORDER HANDLING")
             print("   - ✅ TRADE-TO-TRADE STOCK DETECTION")
+            print("   - ✅ AUTO POSITION EXIT on bot stop")
+            print("   - ✅ PAPER PORTFOLIO RESET")
+            print("   - ✅ PERCENTAGE-BASED RISK LEVELS (10-100%)")
             print(f"🕒 Current time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
             print(f"📊 Market status: {'OPEN' if is_market_open() else 'CLOSED'}")
 
